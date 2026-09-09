@@ -26,6 +26,12 @@ std = ["rusty_alloc-api/std"]
 secure = ["rusty_alloc-api/secure"]
 # Full invariant checking. Debug profiles only — it is not free.
 debug_checks = ["rusty_alloc-api/debug_checks"]
+# The firmware half: re-exports rusty_alloc's fixed-region API (`Region`,
+# `good_region_size`, `region_for`) so a firmware never names `rusty_alloc`.
+# Meaningful only with `--no-default-features` (no `std`) and the two cfgs
+# `ra_single_threaded` + `ra_small_profile` in RUSTFLAGS; with `std` on, the
+# module is absent and the feature is inert (features stay additive).
+small-metal = ["dep:rusty_alloc"]
 
 [dependencies]
 # EXACT pin, and the reason it is exact: 2.0.0 froze the API, but every release
@@ -33,6 +39,9 @@ debug_checks = ["rusty_alloc-api/debug_checks"]
 # could ever resolve backwards is not worth writing. This is the one crate in
 # the family allowed to name it.
 rusty_alloc-api = { version = "=2.0.4", default-features = false }
+# The same pin, named directly only for the fixed-region API the api crate
+# does not re-export (`prim::fixed`). Optional: the firmware half.
+rusty_alloc = { version = "=2.0.4", default-features = false, optional = true }
 
 [lints]
 workspace = true

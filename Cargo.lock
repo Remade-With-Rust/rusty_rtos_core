@@ -38,6 +38,7 @@ dependencies = [
 name = "rusty_rtos_alloc"
 version = "0.1.0"
 dependencies = [
+ "rusty_alloc",
  "rusty_alloc-api",
 ]
 

@@ -75,3 +75,12 @@ jobs:
           targets: ${{ matrix.target }}
       - run: cargo check -p rusty_rtos_core --no-default-features --target ${{ matrix.target }}
       - run: cargo check -p rusty_rtos_core --no-default-features --features alloc --target ${{ matrix.target }}
+      # The allocator seam's small-metal half: rusty_alloc's no_std build must
+      # be opted into (single thread, small segment geometry) or it refuses to
+      # compile by design. The firmware sets the same two cfgs.
+      - run: cargo check -p rusty_rtos_alloc --no-default-features --target ${{ matrix.target }}
+        env:
+          RUSTFLAGS: --cfg ra_single_threaded --cfg ra_small_profile
+      - run: cargo check -p rusty_rtos_alloc --no-default-features --features small-metal --target ${{ matrix.target }}
+        env:
+          RUSTFLAGS: --cfg ra_single_threaded --cfg ra_small_profile
