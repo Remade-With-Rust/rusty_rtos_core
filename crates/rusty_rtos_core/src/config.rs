@@ -58,6 +58,23 @@ pub trait Config {
     /// `configTOTAL_HEAP_SIZE`, for `rusty_rtos_heap`'s region, in bytes.
     const TOTAL_HEAP_SIZE: usize = 4096;
 
+    /// Whether this configuration mirrors a C kernel that takes kernel
+    /// objects from a heap.
+    ///
+    /// This kernel never allocates — every object comes from an arena
+    /// fixed at compile time — so the flag buys no memory and changes no
+    /// behaviour. What it buys is *time*. Every `heap_N.c` wraps its
+    /// `malloc` in `vTaskSuspendAll()` / `xTaskResumeAll()`, and
+    /// `xTaskResumeAll` is a critical section, so on the C side creating a
+    /// queue or a task after the scheduler has started costs one more
+    /// outermost critical-section exit than creating it before. A
+    /// configuration that claims to be trace-identical to such a kernel has
+    /// to spend that exit too.
+    ///
+    /// Leave it `false` for silicon: a static build has no heap and the
+    /// exit is not there to spend.
+    const DYNAMIC_ALLOCATION: bool = false;
+
     // ----- Kairos-only: arena capacities (no C equivalent; see CONFIG-MAP) --
 
     /// How many tasks may exist at once, the idle and timer tasks included.
@@ -155,6 +172,7 @@ impl Config for PosixDemoConfig {
     /// x86_64 Linux host the oracle runs on; `portMAX_DELAY` prints as 2^64-1.
     type Tick = Bits64;
     const TICK_RATE_HZ: u32 = 1000;
+    const DYNAMIC_ALLOCATION: bool = true;
     const MAX_PRIORITIES: u8 = 7;
     const MINIMAL_STACK_SIZE: usize = 128;
     const MAX_TASK_NAME_LEN: usize = 12;

@@ -93,27 +93,36 @@ pub trait Port {
     /// `xPortStartScheduler` has run: tasks are executing now.
     fn scheduler_started(&self) {}
 
-    // --------------------------------------------- nesting across a switch --
+    // ----------------------------------------------- the tail of a switch --
     //
     // Critical nesting is *per task*, even where a port keeps it in one
     // variable: the Posix port saves it in `prvSwitchThread` and restores it
     // when the task is resumed, and hands a brand-new task a zero
     // (`uxCriticalNesting = 0` in `prvWaitForStart`). A kernel with no
-    // stacks has to say that out loud, because the sections a switched-out
-    // task left open are not left open on the CPU — they are left open on a
-    // stack that is not running, and they close when it runs again.
+    // stacks has to say that out loud, and it has to say more than that.
+    //
+    // A thread stops at the switch. A stackless kernel's call does not: the
+    // frame the scheduler switched away from is still on the machine and it
+    // runs to its end — the sections it had open, and any section it opens
+    // and closes afterwards. On the C port none of that has happened yet.
+    // All of it happens when the task runs again.
+    //
+    // So the port stops charging the tail's exits to the clock and counts
+    // them instead, and the kernel replays the count when the task is
+    // switched back in. Counting rather than discarding is the whole point:
+    // a tail is not always just the sections that were open. The timeout
+    // path of `xQueueReceive` calls `prvIsQueueEmpty` *after* the
+    // `xTaskResumeAll` that may have switched the caller away, and that
+    // section is one more exit the C charges to the resumed task.
 
-    /// Take the nesting count away and leave zero, returning what the
-    /// outgoing task had open. The default is for ports that do not track
-    /// nesting themselves.
-    fn take_nesting(&self) -> u32 {
+    /// The switch has happened, and what the caller does from here is the
+    /// tail of a frame the C port would not have run yet: stop counting its
+    /// exits as sim time and tally them.
+    fn begin_unwind(&self) {}
+
+    /// The tail is over. Returns how many outermost exits it made — what
+    /// the switched-out task owes the clock when it next runs.
+    fn end_unwind(&self) -> u32 {
         0
     }
-
-    /// Put a resumed task's nesting count back.
-    fn set_nesting(&self, _nesting: u32) {}
-
-    /// Ignore the next `n` calls to [`Port::exit_critical`]: they are the
-    /// tail of a call on a stack that is no longer running.
-    fn swallow_exits(&self, _n: u32) {}
 }
