@@ -282,6 +282,15 @@ impl Event<'_> {
 /// A trace sink. The kernel calls [`Trace::event`] at every decision the C
 /// kernel traces; the sink decides what to do with it.
 pub trait Trace {
+    /// The port's outermost critical-section exit count, as it stands at
+    /// the moment of the next [`Trace::event`].
+    ///
+    /// On a simulator that number *is* the clock (`ORACLES.md`, sim
+    /// contract v1), so a sink that is being diffed against the C oracle
+    /// can print it as an extra column and compare like for like. A sink
+    /// that does not care ignores it, and the call compiles away.
+    fn note_exits(&mut self, _exits: u64) {}
+
     /// An event, at the kernel's current tick count.
     fn event(&mut self, tick: u64, event: Event<'_>);
 }
