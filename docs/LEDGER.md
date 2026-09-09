@@ -21,5 +21,6 @@ order and the null-arm floor for anything timed.
 
 No speed number, no size number: nothing here has been timed or sized. Nothing
 has run on a chip. The first oracle number belongs to `rusty_rtos_kernel`
-(K1): a `dynamic` trace identical to `oracle/traces/dynamic.trace` in the
-umbrella (24,403 lines, reproducible; umbrella `docs/LEDGER.md`).
+(K1): a `dynamic` trace identical to `oracle/traces/dynamic.trace.zst` in the
+umbrella (24,403 lines, reproducible; `kairos oracle cat dynamic` prints it;
+umbrella `docs/LEDGER.md`).
