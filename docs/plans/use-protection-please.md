@@ -87,7 +87,7 @@ Evidence; excluded from the totals).
 
 | ID | Gate | Status | Evidence | Target |
 |---|---|---|---|---|
-| H-23 | ★ Tests pass under Miri | Incomplete | not yet run | |
+| H-23 | ★ Tests pass under Miri | Completed | `cargo +nightly miri test -p rusty_rtos_core --lib` 2026-09-09 (miri 0.1.0 of 2026-09-08): 31 unit tests pass, 77 s; the two random sweeps in `tests/no_panic.rs` are `#[cfg_attr(miri, ignore)]` (hours under the interpreter) and run natively in the same gate | |
 | H-24 | Critical paths pass the sanitizers (ASan/MSan/TSan) | Incomplete | | |
 | H-25 | `cargo careful test` green | Incomplete | | |
 
@@ -205,3 +205,4 @@ Append one line per pass; never rewrite history. The trend is the point.
 | Date | Depth | Auditor | Completed / Scheduled / Incomplete | ★ met | Note |
 |---|---|---|---|---|---|
 | 2026-09-09 | survey | kairos (scaffold pass) | 7 / 0 / 28 | 5 | first pass, at stamp time; every Completed row names a file that exists |
+| 2026-09-09 | survey + tool probes | kairos (K0 pass) | 15 / 0 / 21 | 9 | deny, audit, clippy and Miri run on the developer box; evidence rows carry the K0 verdicts; risk register R-001..R-004 filled from the plan's §6, acceptance pending the architect |

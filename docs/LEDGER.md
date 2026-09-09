@@ -15,9 +15,8 @@ order and the null-arm floor for anything timed.
 | `cargo fmt --all -- --check` | clean | same run |
 | `cargo deny check` | advisories ok, bans ok, licenses ok, sources ok | same run; `deny.toml` bans `*-sys`, `ring`, `aws-lc-sys`; one unmatched licence allowance (`Zlib`) is a warning, not a failure |
 | `cargo audit` | 0 advisories | 17 locked crates (the dev/`std` closure; the `no_std` core itself has none); advisory-db of 2026-09-09, 1243 advisories |
+| `cargo +nightly miri test -p rusty_rtos_core --lib` | 31 unit tests pass under Miri (77 s) | miri 0.1.0 (2026-09-08) on the Windows host; the two `tests/no_panic.rs` sweeps are ignored under Miri only (`#[cfg_attr(miri, ignore)]`), since a 50k-iteration sweep takes hours in the interpreter; a full `cargo miri test` was stopped at 15 minutes before that attribute existed |
 | `tests/no_panic.rs` | 50,000 random constructions/conversions and 200 rounds × 500 random arena/list operations, no panic, invariants hold each step | LCG-seeded (fixed seed, reproducible), asserts arena occupancy, handle generation monotonicity, list ordering and cursor validity |
-
-Miri: see the hardening plan's H-23 row for the run and its verdict.
 
 No speed number, no size number: nothing here has been timed or sized. Nothing
 has run on a chip. The first oracle number belongs to `rusty_rtos_kernel`

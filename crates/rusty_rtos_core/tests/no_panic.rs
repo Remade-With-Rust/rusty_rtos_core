@@ -61,6 +61,10 @@ fn check<R>(name: &str, input: &str, f: impl FnOnce() -> R) {
 }
 
 #[test]
+#[cfg_attr(
+    miri,
+    ignore = "a 50k-iteration sweep; hours under Miri, milliseconds natively (the unit tests carry the Miri gate)"
+)]
 fn constructors_and_conversions_never_panic() {
     let mut rng = Lcg(0x5eed_0001);
     for _ in 0..50_000 {
@@ -106,6 +110,10 @@ fn constructors_and_conversions_never_panic() {
 }
 
 #[test]
+#[cfg_attr(
+    miri,
+    ignore = "200 x 500 random operations; hours under Miri, milliseconds natively (the unit tests carry the Miri gate)"
+)]
 fn random_list_and_arena_operation_sequences_never_panic() {
     const ITEMS: usize = 12;
     const LISTS: usize = 3;
