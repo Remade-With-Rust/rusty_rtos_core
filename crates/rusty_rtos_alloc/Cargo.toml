@@ -1,0 +1,38 @@
+# The allocator seam. One crate holds the pin, so no deliverable in the family
+# names `rusty_alloc` directly and no library ever declares a global allocator
+# (building-the-new-internet, stack.md section 5; the Janus `rusty_esp_alloc`
+# shape).
+
+[package]
+name = "rusty_rtos_alloc"
+description = "The Kairos allocator seam: rusty_alloc as the global allocator of a hosted deliverable, pinned once."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+readme = "README.md"
+keywords = ["allocator", "rusty_alloc", "rtos", "remade-with-rust"]
+categories = ["memory-management", "no-std"]
+
+[features]
+# Hosted deliverables (the demo runner, the C-ABI test harness) keep `std`.
+default = ["std"]
+std = ["rusty_alloc-api/std"]
+# Guard pages, encrypted free lists, guarded-object sampling. For anything
+# exposed to untrusted input.
+secure = ["rusty_alloc-api/secure"]
+# Full invariant checking. Debug profiles only — it is not free.
+debug_checks = ["rusty_alloc-api/debug_checks"]
+
+[dependencies]
+# EXACT pin, and the reason it is exact: 2.0.0 froze the API, but every release
+# at 0.3.2 and earlier carries use-after-frees on all targets, so a range that
+# could ever resolve backwards is not worth writing. This is the one crate in
+# the family allowed to name it.
+rusty_alloc-api = { version = "=2.0.4", default-features = false }
+
+[lints]
+workspace = true
