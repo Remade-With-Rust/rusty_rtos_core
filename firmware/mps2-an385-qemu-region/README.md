@@ -88,3 +88,55 @@ execution, so a QEMU cell can carry them.
 This is the same rule the rest of the repo already runs on — the kernel's
 speed work is judged on callgrind instruction counts and the corpus, never
 on a clock.
+
+## Flash and RAM, decomposed to the byte
+
+K3's kill test asks for a flash + RAM decomposition. Unlike its cycle rows,
+this one a QEMU cell *can* carry: a footprint is a property of the linked
+binary, not of execution. Taken with `llvm-size -A` and
+`llvm-nm -S --size-sort` on the **linked artifact**, never from source.
+
+### RAM
+
+```text
+RAM origin        0x20000000
+.data                536870912 .. 536870916           4 bytes
+ALIGNMENT GAP        536870916 .. 536870928          12 bytes   <- in NO section
+.bss                 536870928 .. 537069600      198672 bytes
+                                                  --------
+static RAM total                                    198688 bytes
+```
+
+### What `.bss` is
+
+| line | bytes | class |
+|---|---:|---|
+| the declared `Region` | 196,608 | **structure** — it *is* the declaration |
+| `rusty_alloc`'s `FIRST_HEAP_BOX` | 1,752 | structure (allocator metadata) |
+| everything else | 312 | — |
+| **= `.bss`** | **198,672** | remainder **0** |
+
+That is an identity, not a correlation: the region is 98.96% of `.bss`,
+and the three lines reconcile exactly. It says the lever on this
+firmware's RAM is the number in `good_region_size(...)` and nothing else.
+
+### The number worth quoting
+
+```text
+the seam's own static cost, beyond the heap you declare:  2,080 bytes
+FLASH: 1024 vector_table + 13996 .text + 7968 .rodata + 4 = 22,992 bytes
+```
+
+**2,080 bytes of RAM and 22.5 KiB of flash** is what
+`rusty_rtos_alloc` + `rusty_alloc` cost a firmware that declares its own
+heap. Everything else scales with the declaration.
+
+### The 12-byte gap, and why it is printed
+
+It belongs to no section. `.data` ends at `0x20000004` and `.bss` starts
+at `0x20000010`, because the region is `REGION_ALIGN`-aligned; the padding
+between them is charged to nothing and would vanish from any table built
+from `size -A` alone. Here it is 12 bytes on a 4 MiB part and harmless —
+but it is printed because on a fixed small map that is exactly how a
+saving gets overstated, and a decomposition that cannot see between its
+own sections is not a decomposition.
