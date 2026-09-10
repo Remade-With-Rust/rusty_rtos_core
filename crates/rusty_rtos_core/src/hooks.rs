@@ -82,6 +82,13 @@ pub trait TickHook<K>: Copy {
     /// `xTaskIncrementTick` calls `vApplicationTickHook` — including the
     /// second call site, where the scheduler is suspended and the tick is
     /// only being pended. Must not block.
+    ///
+    /// This one *is* handed a copy of the hook to return, because it runs
+    /// in interrupt context: the from-ISR calls it may make take no counted
+    /// critical section, so no tick can land inside it and no second hook
+    /// call can run while this one holds its copy. The other two methods
+    /// run on the daemon task, where that is not true — see
+    /// [`TickHook::timer`].
     fn tick(self, kernel: &mut K) -> Self;
 
     /// `TimerCallbackFunction_t`: what a software timer runs when it
@@ -91,9 +98,20 @@ pub trait TickHook<K>: Copy {
     /// the application switches on, because a kernel with no pointers
     /// cannot hold one — `callback` is that number and `id` is
     /// `pvTimerID`. Both are the timer's own, set when it was created.
-    fn timer(self, _kernel: &mut K, _timer: TimerHandle, _callback: u16, _id: u64) -> Self {
-        self
-    }
+    ///
+    /// # Why this one is not handed a copy of the hook
+    ///
+    /// [`TickHook::tick`] runs in interrupt context, where nothing it calls
+    /// can produce another tick, so a copy is safe there: no second hook
+    /// call can run inside it. A timer callback runs on the daemon *task*,
+    /// and every kernel call it makes takes a critical section whose exit
+    /// can be the one that produces a tick — so the tick hook can run
+    /// inside this one, and whatever it wrote would be lost the moment a
+    /// copy taken beforehand was stored back over it. The C has the same
+    /// re-entrancy and no trouble with it, because its state is `static`
+    /// and every read is a fresh one. Reach the state the same way, through
+    /// the kernel, one short read-modify-write at a time.
+    fn timer(_kernel: &mut K, _timer: TimerHandle, _callback: u16, _id: u64) {}
 
     /// `PendedFunction_t`: what `xTimerPendFunctionCall` defers to the
     /// daemon task, named the same way.
@@ -102,9 +120,10 @@ pub trait TickHook<K>: Copy {
     /// `xEventGroupSetBitsFromISR` is the standard example: an interrupt
     /// cannot walk an event group's waiting list, so it hands the work
     /// over.
-    fn pended(self, _kernel: &mut K, _function: u16, _param1: u64, _param2: u64) -> Self {
-        self
-    }
+    ///
+    /// It runs on the daemon task, so it reaches the hook's state through
+    /// the kernel, for the reason [`TickHook::timer`] gives.
+    fn pended(_kernel: &mut K, _function: u16, _param1: u64, _param2: u64) {}
 }
 
 /// `configUSE_TICK_HOOK 0`: no tick hook.
