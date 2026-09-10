@@ -36,6 +36,16 @@ pub trait Config {
     const USE_TIME_SLICING: bool = true;
     /// `configIDLE_SHOULD_YIELD`.
     const IDLE_SHOULD_YIELD: bool = true;
+
+    /// `configUSE_TICK_HOOK`: whether the kernel calls the tick hook from
+    /// inside `xTaskIncrementTick`.
+    ///
+    /// It is a config flag rather than "install a hook and it runs" because
+    /// the C compiles the call out entirely, and a call that is compiled out
+    /// cannot be where a `FromISR` call happens. Both of the C's call sites
+    /// are mirrored: the one guarded by `xPendedTicks == 0`, and the one in
+    /// the branch that only pends the tick.
+    const USE_TICK_HOOK: bool = false;
     /// `configTASK_NOTIFICATION_ARRAY_ENTRIES`.
     const NOTIFICATION_ARRAY_ENTRIES: usize = 1;
     /// `configNUM_THREAD_LOCAL_STORAGE_POINTERS`.
@@ -181,6 +191,7 @@ impl Config for PosixDemoConfig {
     const TIMER_QUEUE_LENGTH: usize = 20;
     const TIMER_TASK_STACK_DEPTH: usize = 256;
     const CHECK_FOR_STACK_OVERFLOW: u8 = 0;
+    const USE_TICK_HOOK: bool = true;
     const TOTAL_HEAP_SIZE: usize = 65 * 1024;
     const MAX_TASKS: usize = 64;
     const MAX_QUEUES: usize = 64;

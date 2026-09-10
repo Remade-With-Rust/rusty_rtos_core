@@ -85,6 +85,22 @@ pub trait Port {
         0
     }
 
+    /// `portSET_INTERRUPT_MASK_FROM_ISR()`: mask interrupts from inside
+    /// one, returning the previous mask to restore.
+    ///
+    /// It is a *different* seam from [`Port::enter_critical`] because the C
+    /// makes it one, and on the Posix port both halves are literally empty:
+    /// signals are already blocked inside a handler. So a `FromISR` call
+    /// touches neither the nesting count nor the exit count there, and this
+    /// default says exactly that. A silicon port raises BASEPRI (or its
+    /// equivalent) here and still must not count the exit.
+    fn enter_critical_from_isr(&self) -> u32 {
+        0
+    }
+
+    /// `portCLEAR_INTERRUPT_MASK_FROM_ISR( x )`.
+    fn exit_critical_from_isr(&self, _mask: u32) {}
+
     /// Tell the port the kernel is inside its tick entry, where the C
     /// handler runs with interrupts already masked and adjusts the nesting
     /// count by hand rather than through `portEXIT_CRITICAL`.

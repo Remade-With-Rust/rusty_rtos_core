@@ -54,6 +54,47 @@ pub struct NoHooks;
 
 impl Hooks for NoHooks {}
 
+/// `vApplicationTickHook`, as something that can actually reach the kernel.
+///
+/// [`Hooks::tick`] takes `&self` and so can only touch state of its own.
+/// That is enough for a hook that counts, and not enough for the ones the
+/// FreeRTOS standard demos install: they call the `FromISR` half of the
+/// API — `xQueueOverwriteFromISR`, `xQueueSendFromISR`,
+/// `xEventGroupSetBitsFromISR`, `xSemaphoreGiveFromISR` — from inside the
+/// tick interrupt, which is the only place several of them are exercised
+/// at all.
+///
+/// So this seam hands the kernel to the hook. It is `Copy` and takes
+/// `self` by value because the kernel holds it: the kernel copies it out,
+/// runs it, and stores what comes back, which is what lets the hook borrow
+/// the kernel mutably without borrowing itself twice. A hook that reads
+/// `kernel`'s own copy of itself sees the value from before this call —
+/// there is no reason to, and the borrow checker is not the thing stopping
+/// you.
+///
+/// `K` is the kernel type. The kernel is generic over the hook and the
+/// hook is generic over the kernel; that is not circular, because both are
+/// resolved to one concrete pair at the point a firmware names them.
+pub trait TickHook<K>: Copy {
+    /// Run one tick's worth of interrupt-context work.
+    ///
+    /// Called from inside the kernel's tick entry, at exactly the point
+    /// `xTaskIncrementTick` calls `vApplicationTickHook` — including the
+    /// second call site, where the scheduler is suspended and the tick is
+    /// only being pended. Must not block.
+    fn tick(self, kernel: &mut K) -> Self;
+}
+
+/// `configUSE_TICK_HOOK 0`: no tick hook.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub struct NoTickHook;
+
+impl<K> TickHook<K> for NoTickHook {
+    fn tick(self, _kernel: &mut K) -> Self {
+        self
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
@@ -71,5 +112,13 @@ mod tests {
         h.daemon_startup();
         h.post_sleep(1);
         h.passive_idle();
+    }
+
+    #[test]
+    fn the_null_tick_hook_returns_itself_and_touches_nothing() {
+        let mut kernel = 0_u32;
+        let hook = NoTickHook;
+        assert_eq!(TickHook::tick(hook, &mut kernel), NoTickHook);
+        assert_eq!(kernel, 0);
     }
 }
