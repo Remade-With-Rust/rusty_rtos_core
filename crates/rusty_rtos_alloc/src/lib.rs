@@ -84,6 +84,25 @@ pub mod small_metal {
         PrimError, REGION_ALIGN, Region, good_region_size, init_region, region_contains,
         region_for, region_stats, usable_bytes,
     };
+
+    // Two things a firmware needs that are NOT in `prim::fixed`, which is
+    // why a seam that re-exports the fixed-region API in one `pub use`
+    // could not see them. That gap was reported to the allocator's
+    // maintainers as "nothing exposes a per-allocation usable size or a
+    // slow-path counter"; the answer came back that both already exist,
+    // one module over — the same shape as the `PrimError` gap closed in
+    // 2.1.0.
+    //
+    // * `usable_size(p)` answers what a request actually COST in bytes,
+    //   which `region_stats()` cannot: it reports over region extents, so
+    //   it does not move for a small allocation at all.
+    // * `stats()` carries `generic`, `pages_fresh`, `extends` and
+    //   `pages_retired` — the counters that say WHICH route an allocation
+    //   took and what that route churned, deterministically and with no
+    //   clock. On a part where the timing arm needs a quiet core, the
+    //   counter arm needs nothing.
+    pub use rusty_alloc::alloc::{stats, usable_size};
+    pub use rusty_alloc::heap::Stats;
 }
 
 #[cfg(test)]

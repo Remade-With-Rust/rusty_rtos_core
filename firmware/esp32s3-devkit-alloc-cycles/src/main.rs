@@ -50,7 +50,7 @@ use alloc::vec::Vec;
 use esp_backtrace as _;
 use esp_println::println;
 
-use rusty_rtos_alloc::small_metal::{Region, good_region_size, region_contains};
+use rusty_rtos_alloc::small_metal::{Region, good_region_size, region_contains, stats};
 
 esp_bootloader_esp_idf::esp_app_desc!();
 
@@ -65,6 +65,10 @@ static HEAP: Heap = Heap::new();
 const OPS: usize = 256;
 /// Rounds; the answer is the best of them.
 const ROUNDS: usize = 32;
+/// Operations per counter probe. 10,240 = 20 periodic sweeps at the
+/// small profile's 512, enough that the prediction is a ratio and not a
+/// coincidence.
+const COUNT_OPS: usize = 10_240;
 /// Rounds run before any is counted, to warm the instruction cache.
 const WARMUP: usize = 8;
 
@@ -278,7 +282,80 @@ fn main() -> ! {
     }
     println!();
 
-    // ---- Which constant routes it? Not answerable from here. ---------
+    // ---- The mechanism, COUNTED on 32-bit silicon. -------------------
+    //
+    // The allocator's maintainers re-attributed this step (their
+    // `docs/plans/fixed-prim-small-step.md` §8) and the correction matters:
+    // it is **not** `prim::fixed`, it is the **pointer width**.
+    // `SMALL_SIZE_MAX = SMALL_WSIZE_MAX * INTPTR_SIZE` is 1,024 on a 64-bit
+    // host and **512 on a 32-bit chip**, where it lands on the same byte as
+    // `SMALL_OBJ_SIZE_MAX`. The host sweep that "refuted" it was run on
+    // x86-64 — a machine on which the suspect is not at the scene. On i686,
+    // with pointer width as the only variable, 512 -> 513 steps +8.6%.
+    //
+    // Their §8.2 counted the mechanism on a host: both routes take the
+    // generic path on EVERY operation, so the slow path is not the
+    // difference. What differs is that the `direct[]` route retires its
+    // page and carves a fresh one every ~513 operations —
+    // `GENERIC_COLLECT_DEFAULT`, the periodic sweep, which is 512 at the
+    // small profile — while the bin route above `SMALL_SIZE_MAX` never
+    // does. In a loop holding one block live the page is empty at every
+    // sweep, so every sweep costs a carve, an extend and a retire.
+    //
+    // Their §8.5 asks for this on the device, and says the counter half
+    // "is deterministic and needs no quiet box at all". This is that half:
+    // no clock, no best-of-N, just `stats()` either side of the boundary.
+    // 32-bit silicon is the box their host arms could not be.
+    println!("--- the mechanism, counted (no clock) ---");
+    println!("  prediction: the direct[] route (<= SMALL_SIZE_MAX = 512 here)");
+    println!("  carves a page every ~512 ops; the bin route above it carves 0.");
+    println!("     size    ops   generic  pages_fresh  extends  retired  route");
+    for size in [256usize, 512, 513, 1024] {
+        let before = stats();
+        for i in 0..COUNT_OPS {
+            let v: Vec<u8> = Vec::with_capacity(size);
+            core::hint::black_box(&v);
+            drop(core::hint::black_box(v));
+            core::hint::black_box(i);
+        }
+        let after = stats();
+        let d = |a: u64, b: u64| a.saturating_sub(b);
+        let fresh = d(after.pages_fresh, before.pages_fresh);
+        // `SMALL_SIZE_MAX` is 128 words, and a word here is 4 bytes.
+        let route = if size <= 128 * core::mem::size_of::<usize>() {
+            "direct[]"
+        } else {
+            "bin peek"
+        };
+        println!(
+            "  {size:>7}  {COUNT_OPS:>5}  {:>8}  {fresh:>11}  {:>7}  {:>7}  {route}",
+            d(after.generic, before.generic),
+            d(after.extends, before.extends),
+            d(after.pages_retired, before.pages_retired),
+        );
+        // `pages_retired` is the sharp discriminator, and the first
+        // version of this check got the wrong one. It keyed on
+        // `pages_fresh` and demanded ZERO from the bin route — but every
+        // route must carve a FIRST page for a size class it has not served
+        // before, so that check reported FAIL against correct behaviour.
+        // Churn is what distinguishes the routes: retiring a page and
+        // carving it again, over and over. The direct route retires ~21
+        // per 10,240 ops; the bin route retires none, ever.
+        let retired = d(after.pages_retired, before.pages_retired);
+        if size <= 128 * core::mem::size_of::<usize>() {
+            let want = COUNT_OPS as u64 / 512;
+            if retired < want / 2 {
+                failed += 1;
+                println!("           FAIL: direct[] retired {retired}, expected about {want}");
+            }
+        } else if retired != 0 {
+            failed += 1;
+            println!("           FAIL: the bin route retired {retired} pages, expected none");
+        }
+    }
+    println!();
+
+    // ---- Which constant routes it? Answered upstream. ----------------    // ---- Which constant routes it? Not answerable from here. ---------
     //
     // The cycle step at 512 does NOT reproduce on a 64-bit host
     // (`tools/alloc-route-probe`: no step at 512, none at 1,024, and the
