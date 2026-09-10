@@ -271,6 +271,30 @@ impl<const N: usize, const L: usize> Lists<N, L> {
     /// [`Error::InvalidArgument`] for a bad list or item; [`Error::Busy`] if
     /// the item is already in a list (C would corrupt both lists).
     pub fn insert(&mut self, list: ListId, item: ItemId, value: u64) -> Result<()> {
+        self.insert_inner(list, item, Some(value))
+    }
+
+    /// `vListInsert` sorting by the value the item already carries.
+    ///
+    /// The event lists want exactly this: a task's event item keeps the
+    /// value its call set, and the caller used to read that value out and
+    /// hand it straight back, so the item was read once to be written with
+    /// what it already held.
+    ///
+    /// # Errors
+    /// As [`Lists::insert`].
+    pub fn insert_keeping_value(&mut self, list: ListId, item: ItemId) -> Result<()> {
+        self.insert_inner(list, item, None)
+    }
+
+    fn insert_inner(&mut self, list: ListId, item: ItemId, keep: Option<u64>) -> Result<()> {
+        // `None` means "sort by the value the item already carries", which
+        // is what every event-list insert wants; `link_between` then skips
+        // the write, because there is nothing to change.
+        let value = match keep {
+            Some(v) => v,
+            None => self.item(item)?.value,
+        };
         let end = Self::end_of(list);
         let (before, after) = if value == Self::MAX_VALUE {
             (self.end(list)?.prev, end)
@@ -299,7 +323,7 @@ impl<const N: usize, const L: usize> Lists<N, L> {
             }
             (before, after)
         };
-        self.link_between(list, item, before, after, Some(value))
+        self.link_between(list, item, before, after, keep)
     }
 
     /// `vListInsertEnd`: put `item` in `list` immediately before the cursor,
