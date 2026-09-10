@@ -1,0 +1,40 @@
+# A firmware example: its own cargo project and its own workspace, because
+# the parent excludes `firmware/*`.
+[package]
+name = "esp32s3-devkit-alloc-ab"
+version = "0.0.0"
+edition = "2021"
+publish = false
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+rusty_rtos_alloc = { path = "../../crates/rusty_rtos_alloc", default-features = false, features = ["small-metal"] }
+
+# The same pins as the sibling `esp32s3-devkit-alloc-cycles` cell, which
+# is a working S3 firmware. Floating these was a needless experiment: the
+# first attempt took esp-println 0.15, whose build script rejects a
+# configuration with no transport feature.
+esp-hal = { version = "=1.2.1", features = ["esp32s3", "unstable"] }
+xtensa-lx = "=0.13.0"
+esp-bootloader-esp-idf = { version = "=0.6.0", features = ["esp32s3"] }
+esp-println = { version = "=0.18.0", default-features = false, features = [
+    "esp32s3",
+    "jtag-serial",
+] }
+esp-backtrace = { version = "=0.20.0", features = [
+    "esp32s3",
+    "panic-handler",
+    "println",
+] }
+
+[build-dependencies]
+cc = "1"
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"
+overflow-checks = true
+
+[workspace]

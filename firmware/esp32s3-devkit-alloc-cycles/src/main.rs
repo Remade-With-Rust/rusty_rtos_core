@@ -234,6 +234,50 @@ fn main() -> ! {
     println!("  so the table above is a function of size and not of history.");
     println!();
 
+    // ---- Is the plateau ROUTING? A one-byte experiment. ------------
+    //
+    // The plateaus are not the bin geometry — they span eight bins — but
+    // they land exactly on `rusty_alloc`'s PAGE-KIND boundaries. Under
+    // `ra_small_profile`, which every Kairos firmware sets:
+    //
+    //     SEGMENT_SLICE_SIZE  = 4 KiB
+    //     SMALL_OBJ_SIZE_MAX  = SLICE / 8       = 512     <- expensive plateau ends
+    //     MEDIUM_OBJ_SIZE_MAX = 4 * SLICE / 8   = 2048    <- cheap plateau ends
+    //
+    // If the size picks the page KIND, and the small-page route is the
+    // expensive one, then the cost must step at exactly those two values —
+    // between 512 and 513, and between 2048 and 2049 — and nowhere else.
+    // Requests one byte apart cannot differ for any other reason: they
+    // round to the same alignment, they differ by no bin, and the whole
+    // table has already been shown to be a function of size.
+    //
+    // A prediction that can be wrong by one byte is worth more than a
+    // paragraph of mechanism.
+    println!("--- routing: does the cost step at the page-kind boundaries? ---");
+    println!("  SMALL_OBJ_SIZE_MAX = 512, MEDIUM_OBJ_SIZE_MAX = 2048");
+    println!("     size    total      per op   route predicted");
+    for (size, route) in [
+        (256usize, "small"),
+        (511, "small"),
+        (512, "small"),
+        (513, "MEDIUM <- step here"),
+        (640, "medium"),
+        (1024, "medium"),
+        (2047, "medium"),
+        (2048, "medium"),
+        (2049, "LARGE span <- and here"),
+        (2560, "large span"),
+    ] {
+        let (cycles, sum) = best(|| round_alloc(size));
+        let per = cycles.saturating_sub(floor) / OPS as u32;
+        println!("  {size:>7}  {cycles:>7}  {per:>10}   {route}");
+        if sum == 0 {
+            failed += 1;
+            println!("           FAIL: checksum zero -- the work was optimised away");
+        }
+    }
+    println!();
+
     // The allocations really came from the region, which is what says the
     // numbers are the seam's and not some other allocator's.
     let probe: Vec<u8> = Vec::with_capacity(64);

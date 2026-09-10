@@ -34,7 +34,8 @@ Rules:
 |---|---|---|
 | [`esp32s3-devkit-region`](esp32s3-devkit-region) | the `small-metal` seam on silicon, 9/9 | an **ESP32-S3** on USB |
 | [`mps2-an385-qemu-region`](mps2-an385-qemu-region) | the same seam on a Cortex-M3, 9/9, plus the footprint decomposition and the six probes that establish QEMU has no cycle counter | nothing — `kairos check --qemu` |
-| [`esp32s3-devkit-alloc-cycles`](esp32s3-devkit-alloc-cycles) | cycles per `alloc`+`free` against `CCOUNT`, with the palindrome control that says the table is a function of size | an **ESP32-S3** on USB |
+| [`esp32s3-devkit-alloc-cycles`](esp32s3-devkit-alloc-cycles) | cycles per `alloc`+`free` against `CCOUNT`, with the palindrome control that says the table is a function of size, and the one-byte experiment that shows the cost is **routing** | an **ESP32-S3** on USB |
+| [`esp32s3-devkit-alloc-ab`](esp32s3-devkit-alloc-ab) | `rusty_alloc` against FreeRTOS's own `heap_4`, compiled verbatim from the oracle — the A/B `build-me-bare` B4b asks for | an **ESP32-S3** on USB |
 
 `kairos check --qemu` discovers cells by their runner: a `qemu-system-*` one
 needs only this box and is run; an `espflash` one wants a board on a serial
