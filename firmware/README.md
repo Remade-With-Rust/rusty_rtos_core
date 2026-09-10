@@ -27,3 +27,16 @@ Rules:
   `codegen-units = 1`, `panic = "abort"`, `overflow-checks = true`.
 - A firmware example is not a test. The library's tests run on the host and
   on the sim port.
+
+## The cells
+
+| cell | what it proves | needs |
+|---|---|---|
+| [`esp32s3-devkit-region`](esp32s3-devkit-region) | the `small-metal` seam on silicon, 9/9 | an **ESP32-S3** on USB |
+| [`mps2-an385-qemu-region`](mps2-an385-qemu-region) | the same seam on a Cortex-M3, 9/9, plus the footprint decomposition and the six probes that establish QEMU has no cycle counter | nothing — `kairos check --qemu` |
+| [`esp32s3-devkit-alloc-cycles`](esp32s3-devkit-alloc-cycles) | cycles per `alloc`+`free` against `CCOUNT`, with the palindrome control that says the table is a function of size | an **ESP32-S3** on USB |
+
+`kairos check --qemu` discovers cells by their runner: a `qemu-system-*` one
+needs only this box and is run; an `espflash` one wants a board on a serial
+port and is never started by a gate. That is why the two S3 cells above are
+run by hand and the M3 one gates.

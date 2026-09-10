@@ -1,0 +1,43 @@
+# A firmware example, so its own cargo project and its own workspace: the
+# parent excludes `firmware/*` because every chip wants its own target,
+# linker script and (here) its own toolchain.
+[package]
+name = "esp32s3-devkit-alloc-cycles"
+version = "0.0.0"
+edition = "2021"
+publish = false
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+# The thing under test, by path, as firmware/README.md requires. No `std`,
+# and `small-metal` is the firmware half of the seam.
+rusty_rtos_alloc = { path = "../../crates/rusty_rtos_alloc", default-features = false, features = [
+    "small-metal",
+] }
+
+esp-hal = { version = "=1.2.1", features = ["esp32s3", "unstable"] }
+# CCOUNT, the Xtensa cycle counter. It is what makes this cell possible:
+# QEMU was measured six ways to supply no cycle counter at all.
+xtensa-lx = "=0.13.0"
+# esp-hal 1.2 images must carry an ESP-IDF app descriptor or the second-stage
+# bootloader refuses them; `esp_app_desc!()` in main.rs emits it.
+esp-bootloader-esp-idf = { version = "=0.6.0", features = ["esp32s3"] }
+esp-println = { version = "=0.18.0", default-features = false, features = [
+    "esp32s3",
+    "jtag-serial",
+] }
+esp-backtrace = { version = "=0.20.0", features = [
+    "esp32s3",
+    "panic-handler",
+    "println",
+] }
+
+# firmware/README.md's release profile for a chip.
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"
+overflow-checks = true
+
+[workspace]

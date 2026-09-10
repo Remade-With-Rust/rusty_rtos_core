@@ -1,0 +1,24 @@
+# The Xtensa target has no prebuilt sysroot on the esp toolchain, so `core`
+# and `alloc` are built from source.
+[build]
+target = "xtensa-esp32s3-none-elf"
+
+[target.xtensa-esp32s3-none-elf]
+runner = "espflash flash --monitor"
+rustflags = [
+    # rusty_alloc's own opt-ins, both required. Without the first it refuses
+    # to build (its no_std profile assumes one thread); without the second it
+    # builds and then allocates nothing, because the default segment is
+    # 32 MiB and no part here has that.
+    "--cfg", "ra_single_threaded",
+    "--cfg", "ra_small_profile",
+    # esp-hal supplies the whole link map -- and it only takes effect if
+    # `linkall.x` is named. Without it the GCC default script links a binary
+    # that builds and flashes nowhere: `.flash.appdesc` is never placed, and
+    # espflash refuses the image with "appdesc segment not found".
+    "-C", "link-arg=-Tlinkall.x",
+    "-C", "link-arg=-nostartfiles",
+]
+
+[unstable]
+build-std = ["core", "alloc"]
