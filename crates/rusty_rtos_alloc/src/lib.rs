@@ -110,6 +110,6 @@ mod tests {
     #[test]
     fn the_pin_is_what_the_manifest_says() {
         // Moving the pin is a conscious act: the manifest and this line change together.
-        assert_eq!(super::VERSION, "2.1.0");
+        assert_eq!(super::VERSION, "2.2.0");
     }
 }

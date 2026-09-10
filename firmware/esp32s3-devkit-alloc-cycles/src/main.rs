@@ -307,8 +307,10 @@ fn main() -> ! {
     // no clock, no best-of-N, just `stats()` either side of the boundary.
     // 32-bit silicon is the box their host arms could not be.
     println!("--- the mechanism, counted (no clock) ---");
-    println!("  prediction: the direct[] route (<= SMALL_SIZE_MAX = 512 here)");
-    println!("  carves a page every ~512 ops; the bin route above it carves 0.");
+    println!("  since 2.2.0: the direct[] route's fast path HITS (generic well");
+    println!("  under one per op) and does not churn. The bin route still takes");
+    println!("  the generic path every op by design -- the peek cannot hit in an");
+    println!("  alloc/free loop -- but carves nothing after its first page.");
     println!("     size    ops   generic  pages_fresh  extends  retired  route");
     for size in [256usize, 512, 513, 1024] {
         let before = stats();
@@ -341,14 +343,37 @@ fn main() -> ! {
         // Churn is what distinguishes the routes: retiring a page and
         // carving it again, over and over. The direct route retires ~21
         // per 10,240 ops; the bin route retires none, ever.
+        // These bounds encode the FIXED behaviour, and the previous
+        // version encoded the bug. It asserted that the direct[] route
+        // retires ~20 pages per 10,240 ops — which was true, and was the
+        // defect: `page_extend` bounded its batch with a literal that is
+        // only correct at the shipped 64 KiB slice, so under
+        // `ra_small_profile` a 512-byte class computed a batch of 0,
+        // clamped to ONE, and every page carried `capacity == 1`. Fixed in
+        // 2.2.0. A check written to confirm a mechanism becomes a check
+        // that defends it, so it is inverted here rather than deleted.
         let retired = d(after.pages_retired, before.pages_retired);
+        let generic = d(after.generic, before.generic);
         if size <= 128 * core::mem::size_of::<usize>() {
-            let want = COUNT_OPS as u64 / 512;
-            if retired < want / 2 {
+            // The fast path must actually hit. At `capacity == 1` it never
+            // could, and `generic` sat at exactly one per op.
+            if generic >= COUNT_OPS as u64 {
                 failed += 1;
-                println!("           FAIL: direct[] retired {retired}, expected about {want}");
+                println!(
+                    "           FAIL: direct[] took the generic path on every op                      ({generic}/{COUNT_OPS}) -- the capacity=1 regression"
+                );
+            }
+            // And it must not churn pages to do it.
+            if retired > COUNT_OPS as u64 / 512 {
+                failed += 1;
+                println!("           FAIL: direct[] retired {retired}, churn is back");
             }
         } else if retired != 0 {
+            // The bin route enters the generic path on every operation BY
+            // DESIGN in this workload -- `alloc.rs` records that a tight
+            // alloc/free loop frees into `local_free`, so the queue front's
+            // free list is always dry and the peek can never hit. What it
+            // must not do is churn.
             failed += 1;
             println!("           FAIL: the bin route retired {retired} pages, expected none");
         }
