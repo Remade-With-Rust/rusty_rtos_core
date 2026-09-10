@@ -1,0 +1,13 @@
+[build]
+target = "thumbv7m-none-eabi"
+
+[target.thumbv7m-none-eabi]
+# The M3 has no FPU, so this is thumbv7m-none-eabi and NOT the
+# thumbv7em-none-eabihf every other bare-metal rung uses.
+runner = "qemu-system-arm -cpu cortex-m3 -machine mps2-an385 -nographic -semihosting-config enable=on,target=native -kernel"
+rustflags = [
+    # rusty_alloc's two opt-ins, both required.
+    "--cfg", "ra_single_threaded",
+    "--cfg", "ra_small_profile",
+    "-C", "link-arg=-Tlink.x",
+]
