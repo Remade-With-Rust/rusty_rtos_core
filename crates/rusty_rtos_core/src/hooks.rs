@@ -7,7 +7,7 @@
 //! methods with no-op defaults on a type the kernel is generic over, so a
 //! firmware implements the ones it wants and forgets none.
 
-use crate::handle::TaskHandle;
+use crate::handle::{TaskHandle, TimerHandle};
 
 /// The application's hooks. Every method has a no-op default.
 pub trait Hooks {
@@ -83,6 +83,28 @@ pub trait TickHook<K>: Copy {
     /// second call site, where the scheduler is suspended and the tick is
     /// only being pended. Must not block.
     fn tick(self, kernel: &mut K) -> Self;
+
+    /// `TimerCallbackFunction_t`: what a software timer runs when it
+    /// expires, on the daemon task.
+    ///
+    /// A callback is a function pointer in the C. Here it is a small number
+    /// the application switches on, because a kernel with no pointers
+    /// cannot hold one — `callback` is that number and `id` is
+    /// `pvTimerID`. Both are the timer's own, set when it was created.
+    fn timer(self, _kernel: &mut K, _timer: TimerHandle, _callback: u16, _id: u64) -> Self {
+        self
+    }
+
+    /// `PendedFunction_t`: what `xTimerPendFunctionCall` defers to the
+    /// daemon task, named the same way.
+    ///
+    /// This is how an interrupt reaches something it may not touch itself.
+    /// `xEventGroupSetBitsFromISR` is the standard example: an interrupt
+    /// cannot walk an event group's waiting list, so it hands the work
+    /// over.
+    fn pended(self, _kernel: &mut K, _function: u16, _param1: u64, _param2: u64) -> Self {
+        self
+    }
 }
 
 /// `configUSE_TICK_HOOK 0`: no tick hook.

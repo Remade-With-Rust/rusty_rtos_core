@@ -47,6 +47,9 @@ pub trait Config {
     /// the branch that only pends the tick.
     const USE_TICK_HOOK: bool = false;
 
+    /// `configUSE_TIMERS`: whether the software timer daemon exists.
+    const USE_TIMERS: bool = true;
+
     /// `sizeof( configMESSAGE_BUFFER_LENGTH_TYPE )`: how many bytes a
     /// message buffer spends on each message's length prefix.
     ///
@@ -125,6 +128,9 @@ pub trait Config {
             // because stable Rust cannot size one from an associated
             // const; asking for more would silently lose slots.
             && Self::NOTIFICATION_ARRAY_ENTRIES <= 4
+            // The command ring beside the timer queue is a fixed maximum,
+            // for the same reason the notification arrays are.
+            && Self::TIMER_QUEUE_LENGTH <= 32
             && Self::TIMER_QUEUE_LENGTH >= 1
             && Self::CHECK_FOR_STACK_OVERFLOW <= 2
             && Self::NUMBER_OF_CORES >= 1
