@@ -278,6 +278,32 @@ fn main() -> ! {
     }
     println!();
 
+    // ---- Which constant routes it? Not answerable from here. ---------
+    //
+    // The cycle step at 512 does NOT reproduce on a 64-bit host
+    // (`tools/alloc-route-probe`: no step at 512, none at 1,024, and the
+    // whole sweep runs at 13 cycles/op against this part's 314). So it is
+    // neither a generic geometry effect nor the `direct[]` table, whose
+    // top is 1,024 on 64-bit. What differs is the PRIM — a firmware uses
+    // `prim::fixed`, a host uses the OS one — and the prim is selected by
+    // target OS rather than by a feature, so it cannot be swapped on a
+    // host to find out.
+    //
+    // The obvious answer from here would be a FOOTPRINT one: a small page
+    // is one slice (4 KiB) and a medium page is four (16 KiB), so if the
+    // size selects the page kind then a 513-byte allocation should claim
+    // four times the region a 512-byte one does. **The seam cannot see
+    // it.** `region_stats()` answers over region EXTENTS — it moves when a
+    // whole segment is claimed, not when a page is — so the probe that
+    // asked this read 0 for all six sizes and could not have reported
+    // anything else. It was deleted rather than shipped: a check that
+    // cannot fail is the defect this project has now caught three times.
+    //
+    // Recorded as the second seam gap, beside the missing per-allocation
+    // usable size: a firmware has no way to observe which page kind serves
+    // it, or what a request costs in region bytes — which is exactly what
+    // tuning around this boundary would need.
+
     // The allocations really came from the region, which is what says the
     // numbers are the seam's and not some other allocator's.
     let probe: Vec<u8> = Vec::with_capacity(64);
