@@ -7,7 +7,7 @@
 //! methods with no-op defaults on a type the kernel is generic over, so a
 //! firmware implements the ones it wants and forgets none.
 
-use crate::handle::{TaskHandle, TimerHandle};
+use crate::handle::{StreamBufferHandle, TaskHandle, TimerHandle};
 
 /// The application's hooks. Every method has a no-op default.
 pub trait Hooks {
@@ -124,6 +124,26 @@ pub trait TickHook<K>: Copy {
     /// It runs on the daemon task, so it reaches the hook's state through
     /// the kernel, for the reason [`TickHook::timer`] gives.
     fn pended(_kernel: &mut K, _function: u16, _param1: u64, _param2: u64) {}
+
+    /// `sbSEND_COMPLETED`: what a finished send does about the reader.
+    ///
+    /// The kernel's own answer is to notify the task waiting to receive,
+    /// and that is what happens when this returns `false` — which is the
+    /// default, and what the C's default macro expands to.
+    ///
+    /// It is a seam because FreeRTOS makes it one. `MessageBufferAMP`
+    /// redefines the macro to pretend the reader is on another core: the
+    /// send posts the buffer's handle to a control buffer and pokes what
+    /// stands in for the other core's interrupt, which reads the handle
+    /// back and *then* notifies. Returning `true` says the hook did all of
+    /// that and the kernel must not notify as well.
+    ///
+    /// Like [`TickHook::timer`] this runs on a task — the sending one —
+    /// so it reaches the hook's state through the kernel rather than
+    /// holding a copy across the calls it makes.
+    fn send_completed(_kernel: &mut K, _buffer: StreamBufferHandle) -> bool {
+        false
+    }
 }
 
 /// `configUSE_TICK_HOOK 0`: no tick hook.
