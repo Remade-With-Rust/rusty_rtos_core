@@ -118,12 +118,17 @@ impl<const N: usize, const L: usize> Lists<N, L> {
     }
 
     const fn is_end(link: u16) -> bool {
-        link >= END_BASE && link != NONE
+        link >= END_BASE
     }
 
-    fn list_of_end(link: u16) -> Option<ListId> {
-        if Self::is_end(link) {
-            u8::try_from(link.wrapping_sub(END_BASE)).ok()
+    /// The `ends` subscript for an end-marker link, or `None` for an item.
+    ///
+    /// [`NONE`] needs no special case: it is `0x7fff` above `END_BASE` and
+    /// `L <= u8::MAX`, so the bounds check on `ends` refuses it anyway —
+    /// one comparison doing what the old `link != NONE` did with two.
+    const fn end_index(link: u16) -> Option<usize> {
+        if link >= END_BASE {
+            Some(link.wrapping_sub(END_BASE) as usize)
         } else {
             None
         }
@@ -153,20 +158,35 @@ impl<const N: usize, const L: usize> Lists<N, L> {
             .ok_or(Error::InvalidArgument)
     }
 
-    /// `(prev, next, value)` of any node, item or end marker.
-    fn links(&self, link: u16) -> Result<(u16, u16, u64)> {
-        if let Some(list) = Self::list_of_end(link) {
-            let e = self.end(list)?;
-            Ok((e.prev, e.next, Self::MAX_VALUE))
+    /// `(next, value)` of any node: what the sorted walk reads per step.
+    ///
+    /// Every one of these helpers takes exactly the fields its caller needs
+    /// from **one** array read. The version this replaced returned all three
+    /// fields as a tuple, so a caller wanting two of them from two nodes
+    /// paid four bounds checks and four end-marker tests for two reads.
+    /// That re-reading was most of what put this list at 2.08x `list.c`.
+    fn next_and_value(&self, link: u16) -> Result<(u16, u64)> {
+        if let Some(i) = Self::end_index(link) {
+            let e = self.ends.get(i).ok_or(Error::InvalidArgument)?;
+            Ok((e.next, Self::MAX_VALUE))
         } else {
             let n = self.item(link)?;
-            Ok((n.prev, n.next, n.value))
+            Ok((n.next, n.value))
+        }
+    }
+
+    /// `prev` of any node.
+    fn prev_of(&self, link: u16) -> Result<u16> {
+        if let Some(i) = Self::end_index(link) {
+            Ok(self.ends.get(i).ok_or(Error::InvalidArgument)?.prev)
+        } else {
+            Ok(self.item(link)?.prev)
         }
     }
 
     fn set_next(&mut self, link: u16, next: u16) -> Result<()> {
-        if let Some(list) = Self::list_of_end(link) {
-            self.end_mut(list)?.next = next;
+        if let Some(i) = Self::end_index(link) {
+            self.ends.get_mut(i).ok_or(Error::InvalidArgument)?.next = next;
         } else {
             self.item_mut(link)?.next = next;
         }
@@ -174,19 +194,39 @@ impl<const N: usize, const L: usize> Lists<N, L> {
     }
 
     fn set_prev(&mut self, link: u16, prev: u16) -> Result<()> {
-        if let Some(list) = Self::list_of_end(link) {
-            self.end_mut(list)?.prev = prev;
+        if let Some(i) = Self::end_index(link) {
+            self.ends.get_mut(i).ok_or(Error::InvalidArgument)?.prev = prev;
         } else {
             self.item_mut(link)?.prev = prev;
         }
         Ok(())
     }
 
-    /// Link `item` between `before` and `before.next`, in `list`.
-    fn link_after(&mut self, list: ListId, item: ItemId, before: u16) -> Result<()> {
-        let (_, after, _) = self.links(before)?;
+    /// Link `item` between `before` and `after`, in `list`.
+    ///
+    /// The caller passes `after` because it always already knows it:
+    /// [`Lists::insert`] has just walked to it, and [`Lists::insert_end`]
+    /// inserts before the cursor. Reading `before.next` here again was a
+    /// whole node read per insert for a value the caller had in hand.
+    fn link_between(
+        &mut self,
+        list: ListId,
+        item: ItemId,
+        before: u16,
+        after: u16,
+        value: Option<u64>,
+    ) -> Result<()> {
         {
             let n = self.item_mut(item)?;
+            // The `Busy` check rides the read that is happening anyway, and
+            // happens before anything is written — so a refused insert
+            // still leaves both lists exactly as it found them.
+            if n.container.is_some() {
+                return Err(Error::Busy);
+            }
+            if let Some(value) = value {
+                n.value = value;
+            }
             n.prev = before;
             n.next = after;
             n.container = Some(list);
@@ -231,34 +271,35 @@ impl<const N: usize, const L: usize> Lists<N, L> {
     /// [`Error::InvalidArgument`] for a bad list or item; [`Error::Busy`] if
     /// the item is already in a list (C would corrupt both lists).
     pub fn insert(&mut self, list: ListId, item: ItemId, value: u64) -> Result<()> {
-        self.end(list)?;
-        if self.item(item)?.container.is_some() {
-            return Err(Error::Busy);
-        }
-        self.item_mut(item)?.value = value;
         let end = Self::end_of(list);
-        let before = if value == Self::MAX_VALUE {
-            self.end(list)?.prev
+        let (before, after) = if value == Self::MAX_VALUE {
+            (self.end(list)?.prev, end)
         } else {
             // Walk from the end marker while the NEXT node's value is <= ours,
             // which stops at the marker (MAX_VALUE) at the latest.
-            let mut iter = end;
+            //
+            // One node read per step, not two: the node whose value decides
+            // the step is also the node whose `next` is the following step's,
+            // so `next_and_value` takes both at once. `after` falls out of
+            // the walk, which is why nothing re-reads `before.next` after it.
+            let mut before = end;
+            let mut after = self.next_and_value(end)?.0;
             let mut guard = 0usize;
             loop {
-                let (_, next, _) = self.links(iter)?;
-                let (_, _, next_value) = self.links(next)?;
-                if next_value > value {
+                let (following, after_value) = self.next_and_value(after)?;
+                if after_value > value {
                     break;
                 }
-                iter = next;
+                before = after;
+                after = following;
                 guard = guard.saturating_add(1);
                 if guard > N {
                     return Err(Error::InvalidArgument);
                 }
             }
-            iter
+            (before, after)
         };
-        self.link_after(list, item, before)
+        self.link_between(list, item, before, after, Some(value))
     }
 
     /// `vListInsertEnd`: put `item` in `list` immediately before the cursor,
@@ -267,12 +308,11 @@ impl<const N: usize, const L: usize> Lists<N, L> {
     /// # Errors
     /// As [`Lists::insert`].
     pub fn insert_end(&mut self, list: ListId, item: ItemId) -> Result<()> {
+        // The cursor is the node we insert before, so it *is* `after` and
+        // nothing has to read `before.next` to find it again.
         let cursor = self.end(list)?.cursor;
-        if self.item(item)?.container.is_some() {
-            return Err(Error::Busy);
-        }
-        let (before, _, _) = self.links(cursor)?;
-        self.link_after(list, item, before)
+        let before = self.prev_of(cursor)?;
+        self.link_between(list, item, before, cursor, None)
     }
 
     /// `uxListRemove`: take `item` out of whichever list holds it and return
@@ -283,24 +323,32 @@ impl<const N: usize, const L: usize> Lists<N, L> {
     /// [`Error::InvalidArgument`] for a bad item; [`Error::NotActive`] if the
     /// item is in no list.
     pub fn remove(&mut self, item: ItemId) -> Result<usize> {
-        let (prev, next, _) = self.links(item)?;
-        let Some(list) = self.item(item)?.container else {
+        // One read takes all three fields. An `ItemId` is never an end
+        // marker, so this goes straight to `items` rather than through the
+        // end-marker test the general helpers have to make.
+        let (prev, next, container) = {
+            let n = self.item(item)?;
+            (n.prev, n.next, n.container)
+        };
+        let Some(list) = container else {
             return Err(Error::NotActive);
         };
         self.set_next(prev, next)?;
         self.set_prev(next, prev)?;
         {
-            let e = self.end_mut(list)?;
-            if e.cursor == item {
-                e.cursor = prev;
-            }
-            e.len = e.len.saturating_sub(1);
+            let n = self.item_mut(item)?;
+            n.container = None;
+            n.prev = NONE;
+            n.next = NONE;
         }
-        let n = self.item_mut(item)?;
-        n.container = None;
-        n.prev = NONE;
-        n.next = NONE;
-        Ok(usize::from(self.end(list)?.len))
+        // The length this answers is the one just decremented, so the
+        // trailing re-read of the end marker is gone.
+        let e = self.end_mut(list)?;
+        if e.cursor == item {
+            e.cursor = prev;
+        }
+        e.len = e.len.saturating_sub(1);
+        Ok(usize::from(e.len))
     }
 
     /// `listLIST_IS_EMPTY`.
@@ -348,13 +396,22 @@ impl<const N: usize, const L: usize> Lists<N, L> {
     /// [`Error::InvalidArgument`] for a list outside `0..L`.
     pub fn next_round_robin(&mut self, list: ListId) -> Result<Option<ItemId>> {
         let end = Self::end_of(list);
-        let e = self.end(list)?;
-        if e.len == 0 {
+        // The node after the end marker is the list's first item, which is
+        // the `ends[list].next` this read already took — so wrapping costs
+        // no second read, which is what it used to cost on every lap.
+        let (cursor, len, first) = {
+            let e = self.end(list)?;
+            (e.cursor, e.len, e.next)
+        };
+        if len == 0 {
             return Ok(None);
         }
-        let (_, mut next, _) = self.links(e.cursor)?;
+        let mut next = if cursor == end {
+            first
+        } else {
+            self.item(cursor)?.next
+        };
         if next == end {
-            let (_, first, _) = self.links(end)?;
             next = first;
         }
         self.end_mut(list)?.cursor = next;
@@ -367,11 +424,11 @@ impl<const N: usize, const L: usize> Lists<N, L> {
     /// [`Error::InvalidArgument`] for a bad item; [`Error::NotActive`] if
     /// the item is in no list.
     pub fn next(&self, item: ItemId) -> Result<Option<ItemId>> {
-        if self.item(item)?.container.is_none() {
+        let n = self.item(item)?;
+        if n.container.is_none() {
             return Err(Error::NotActive);
         }
-        let (_, next, _) = self.links(item)?;
-        Ok((!Self::is_end(next)).then_some(next))
+        Ok((!Self::is_end(n.next)).then_some(n.next))
     }
 
     /// The items of `list` from the head, in list order.
