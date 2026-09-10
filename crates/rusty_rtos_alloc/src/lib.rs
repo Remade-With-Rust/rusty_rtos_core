@@ -45,6 +45,11 @@
 //! let usable = HEAP.give()?; // three whole 64 KiB segments: 196_608 bytes
 //! ```
 //!
+//! The `?` there needs a nameable error, which is why [`small_metal`]
+//! re-exports [`small_metal::PrimError`] and the four `FERR_*` codes it
+//! can carry: `PrimError` is a `u32`, so the codes are the difference
+//! between "the region was refused" and knowing which way.
+//!
 //! and builds with `panic = "abort"` (rusty_alloc aborts by panicking
 //! without `std`). The seam compiles on `thumbv7em-none-eabihf`,
 //! `thumbv8m.main-none-eabihf`, `riscv32imac-unknown-none-elf` and
@@ -68,11 +73,16 @@ pub use rusty_alloc_api::VERSION;
 /// `small-metal` feature; see the crate docs for the two `--cfg` flags.
 #[cfg(all(feature = "small-metal", not(feature = "std")))]
 pub mod small_metal {
-    // What 2.0.4 exposes; `REGION_ALIGN` and a public error type arrive with
-    // the next rusty_alloc release and join this list when the pin moves.
+    // The whole recipe the crate docs above spell out, and nothing that
+    // is not part of it. `PrimError` is what makes the documented
+    // `HEAP.give()?` writable at all -- without it a firmware cannot name
+    // the error type it is propagating -- and the four `FERR_*` codes are
+    // what make it readable, because `PrimError` is a `u32` and a bare
+    // integer says nothing about which way the geometry was wrong.
     pub use rusty_alloc::prim::fixed::{
-        FIXED_PAGE, MIN_REGION, Region, good_region_size, init_region, region_contains, region_for,
-        region_stats, usable_bytes,
+        FERR_GEOMETRY, FERR_MISALIGNED, FERR_REGISTERED, FERR_TOO_SMALL, FIXED_PAGE, MIN_REGION,
+        PrimError, REGION_ALIGN, Region, good_region_size, init_region, region_contains,
+        region_for, region_stats, usable_bytes,
     };
 }
 
@@ -81,6 +91,6 @@ mod tests {
     #[test]
     fn the_pin_is_what_the_manifest_says() {
         // Moving the pin is a conscious act: the manifest and this line change together.
-        assert_eq!(super::VERSION, "2.0.4");
+        assert_eq!(super::VERSION, "2.1.0");
     }
 }

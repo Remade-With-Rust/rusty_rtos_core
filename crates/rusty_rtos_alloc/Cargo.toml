@@ -38,10 +38,10 @@ small-metal = ["dep:rusty_alloc"]
 # at 0.3.2 and earlier carries use-after-frees on all targets, so a range that
 # could ever resolve backwards is not worth writing. This is the one crate in
 # the family allowed to name it.
-rusty_alloc-api = { version = "=2.0.4", default-features = false }
+rusty_alloc-api = { version = "=2.1.0", default-features = false }
 # The same pin, named directly only for the fixed-region API the api crate
 # does not re-export (`prim::fixed`). Optional: the firmware half.
-rusty_alloc = { version = "=2.0.4", default-features = false, optional = true }
+rusty_alloc = { version = "=2.1.0", default-features = false, optional = true }
 
 [lints]
 workspace = true
