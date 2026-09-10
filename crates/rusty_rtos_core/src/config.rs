@@ -46,6 +46,15 @@ pub trait Config {
     /// are mirrored: the one guarded by `xPendedTicks == 0`, and the one in
     /// the branch that only pends the tick.
     const USE_TICK_HOOK: bool = false;
+
+    /// `sizeof( configMESSAGE_BUFFER_LENGTH_TYPE )`: how many bytes a
+    /// message buffer spends on each message's length prefix.
+    ///
+    /// The C defaults the type to `size_t`, so this is the *host's* pointer
+    /// width — eight on the machine the oracle runs on, four on a 32-bit
+    /// chip. It is in the arithmetic of every message send, so a
+    /// configuration that claims to match a given kernel has to say which.
+    const MESSAGE_LENGTH_BYTES: usize = 4;
     /// `configTASK_NOTIFICATION_ARRAY_ENTRIES`.
     const NOTIFICATION_ARRAY_ENTRIES: usize = 1;
     /// `configNUM_THREAD_LOCAL_STORAGE_POINTERS`.
@@ -112,6 +121,10 @@ pub trait Config {
             && Self::TIMER_TASK_STACK_DEPTH >= Self::MINIMAL_STACK_SIZE
             && Self::MAX_TASK_NAME_LEN >= 1
             && Self::NOTIFICATION_ARRAY_ENTRIES >= 1
+            // The kernel's per-task arrays are sized at a fixed maximum
+            // because stable Rust cannot size one from an associated
+            // const; asking for more would silently lose slots.
+            && Self::NOTIFICATION_ARRAY_ENTRIES <= 4
             && Self::TIMER_QUEUE_LENGTH >= 1
             && Self::CHECK_FOR_STACK_OVERFLOW <= 2
             && Self::NUMBER_OF_CORES >= 1
@@ -192,6 +205,9 @@ impl Config for PosixDemoConfig {
     const TIMER_TASK_STACK_DEPTH: usize = 256;
     const CHECK_FOR_STACK_OVERFLOW: u8 = 0;
     const USE_TICK_HOOK: bool = true;
+    const NOTIFICATION_ARRAY_ENTRIES: usize = 3;
+    // The oracle host is x86-64, so `size_t` is eight bytes wide.
+    const MESSAGE_LENGTH_BYTES: usize = 8;
     const TOTAL_HEAP_SIZE: usize = 65 * 1024;
     const MAX_TASKS: usize = 64;
     const MAX_QUEUES: usize = 64;
