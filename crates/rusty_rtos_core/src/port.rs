@@ -16,8 +16,39 @@ use crate::isr::Woken;
 
 /// What a port provides to the kernel.
 pub trait Port {
+    /// Whether the PORT commits a context switch, inside its own switching
+    /// exception, rather than the kernel committing it at the point of the
+    /// yield.
+    ///
+    /// # Why this exists
+    ///
+    /// [`Kernel::port_yield`] calls `switch_context`, which moves
+    /// `current`. On a **stackless** kernel that IS the switch: no task owns
+    /// a stack, so changing which task the runner steps next is the whole
+    /// of it, and every architecture the conformance corpus runs on depends
+    /// on that being true.
+    ///
+    /// A **stacked** port cannot switch at that moment. `yield_now` can only
+    /// raise its switching exception; the registers and the stack move
+    /// later, when the exception is taken. Between the two, code runs as a
+    /// task the kernel no longer thinks is current — and a blocking call
+    /// made in that gap parks the wrong task.
+    ///
+    /// Set this `true` and the kernel stops committing at the yield: it asks
+    /// the port instead, and the port's exception calls `switch_context`
+    /// itself, so the decision and the register swap are one step.
+    ///
+    /// Left `false`, the kernel behaves exactly as it always has. The
+    /// corpus is the proof: 19 scenarios byte-identical to the C kernel,
+    /// and a `const` means the branch is not even compiled.
+    const COMMITS_SWITCH: bool = false;
+
     /// `portYIELD()`: request a context switch at the next opportunity.
     /// From task context only; an ISR uses [`Port::yield_from_isr`].
+    ///
+    /// On a port with [`Port::COMMITS_SWITCH`] set this is how the kernel
+    /// asks for a switch at all, so it must raise the port's switching
+    /// exception rather than merely note the request.
     fn yield_now(&self);
 
     /// `portYIELD_FROM_ISR(x)`: switch on the way out of the interrupt if a

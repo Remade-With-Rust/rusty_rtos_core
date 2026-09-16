@@ -413,6 +413,17 @@ impl<const N: usize, const L: usize> Lists<N, L> {
         }
     }
 
+    /// Where the round-robin cursor (`pxIndex`) currently sits.
+    ///
+    /// A diagnostic. When a ready task is never chosen, the question is
+    /// always "did the cursor move", and nothing else can answer it.
+    ///
+    /// # Errors
+    /// [`Error::InvalidArgument`] for a list that does not exist.
+    pub fn cursor_of(&self, list: ListId) -> Result<ItemId> {
+        Ok(self.end(list)?.cursor)
+    }
+
     /// `listGET_OWNER_OF_NEXT_ENTRY`: advance the cursor past the end marker
     /// and return the item it lands on, or `None` when the list is empty.
     ///
@@ -496,6 +507,95 @@ mod tests {
 
     fn order(l: &Lists<8, 2>, list: ListId) -> Vec<ItemId> {
         l.iter(list).collect()
+    }
+
+    /// `listGET_OWNER_OF_NEXT_ENTRY` on a two-item list must ALTERNATE.
+    ///
+    /// This is the whole of round-robin scheduling between equal
+    /// priorities, and two items is the case where getting it wrong is
+    /// invisible in a total and fatal in practice: a cursor that advances
+    /// twice per call, or not at all, returns the same item for ever and
+    /// one of the two tasks never runs again.
+    #[test]
+    fn round_robin_alternates_between_two_items() {
+        let mut l = Lists::<8, 2>::new();
+        l.insert_end(0, 1).unwrap();
+        l.insert_end(0, 2).unwrap();
+        assert_eq!(l.len(0).unwrap(), 2);
+
+        let mut seen = Vec::new();
+        for _ in 0..6 {
+            seen.push(l.next_round_robin(0).unwrap());
+        }
+        let mut it = seen.iter();
+        let a = it.next().copied().unwrap();
+        let b = it.next().copied().unwrap();
+        assert_ne!(a, b, "two calls in a row returned the same item: {seen:?}");
+        let want = [a, b, a, b, a, b];
+        assert!(
+            seen.iter().eq(want.iter()),
+            "the rotation did not alternate: {seen:?}"
+        );
+    }
+
+    /// The rotation must survive OTHER lists being used in between.
+    ///
+    /// This is the scheduler's real shape: a busy priority with two ready
+    /// tasks, and a higher priority whose task keeps blocking and waking.
+    /// Between two selections from the busy list, another list is rotated,
+    /// emptied and refilled -- and the busy list's cursor has to be
+    /// exactly where it was left.
+    #[test]
+    fn round_robin_survives_another_list_being_used_between_calls() {
+        let mut l = Lists::<8, 2>::new();
+        // list 0: the busy priority, two tasks that never leave.
+        l.insert_end(0, 1).unwrap();
+        l.insert_end(0, 2).unwrap();
+        // list 1: the higher priority, one task that comes and goes.
+        l.insert_end(1, 3).unwrap();
+
+        let mut seen = Vec::new();
+        for _ in 0..6 {
+            // the higher priority runs...
+            assert_eq!(l.next_round_robin(1).unwrap(), Some(3));
+            // ...blocks...
+            l.remove(3).unwrap();
+            // ...so the scheduler comes back to the busy list.
+            seen.push(l.next_round_robin(0).unwrap().unwrap());
+            // ...and later it wakes again.
+            l.insert_end(1, 3).unwrap();
+        }
+        let a = seen.first().copied().unwrap();
+        assert!(
+            seen.iter().any(|&x| x != a),
+            "the busy list stopped rotating once another list was used: {seen:?}"
+        );
+    }
+
+    /// Three items rotate in order and come back round.
+    #[test]
+    fn round_robin_visits_every_item_in_turn() {
+        let mut l = Lists::<8, 2>::new();
+        for item in 1..=3 {
+            l.insert_end(0, item).unwrap();
+        }
+        let mut seen = Vec::new();
+        for _ in 0..6 {
+            seen.push(l.next_round_robin(0).unwrap().unwrap());
+        }
+        assert_eq!(seen.len(), 6);
+        let first = seen.first().copied().unwrap();
+        assert_eq!(
+            seen.get(3).copied(),
+            Some(first),
+            "it did not come back round after three"
+        );
+        let mut lap: Vec<ItemId> = seen.iter().take(3).copied().collect();
+        lap.sort_unstable();
+        assert!(
+            lap.iter().eq([1, 2, 3].iter()),
+            "not every item was visited: {seen:?}"
+        );
     }
 
     #[test]

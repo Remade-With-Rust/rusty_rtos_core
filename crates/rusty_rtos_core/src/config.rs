@@ -97,6 +97,25 @@ pub trait Config {
     /// exit is not there to spend.
     const DYNAMIC_ALLOCATION: bool = false;
 
+    /// Whether the port's `pxPortInitialiseStack` runs inside a critical
+    /// section, and so costs one more outermost exit per task created.
+    ///
+    /// This is a PORT fact, not a kernel one, which is why it is not folded
+    /// into [`Config::DYNAMIC_ALLOCATION`]. The oracle's Posix port does not
+    /// lay out a register frame like a silicon port — it calls
+    /// `pthread_create`, and wraps that call in
+    /// `vPortEnterCritical()` / `vPortExitCritical()`. A Cortex-M or
+    /// RISC-V port writes an initial frame into the task's stack with
+    /// interrupts left alone, and spends nothing.
+    ///
+    /// Like `DYNAMIC_ALLOCATION` this buys no behaviour, only *time*, and
+    /// only after the scheduler is running: the sim port counts no exits
+    /// before that, so it is invisible to any scenario that creates all of
+    /// its tasks up front. `death` is the first one that does not.
+    ///
+    /// Leave it `false` for silicon.
+    const PORT_STACK_INIT_CRITICAL: bool = false;
+
     // ----- Kairos-only: arena capacities (no C equivalent; see CONFIG-MAP) --
 
     /// How many tasks may exist at once, the idle and timer tasks included.
@@ -202,6 +221,8 @@ impl Config for PosixDemoConfig {
     type Tick = Bits64;
     const TICK_RATE_HZ: u32 = 1000;
     const DYNAMIC_ALLOCATION: bool = true;
+    /// The Posix port wraps its `pthread_create` in a critical section.
+    const PORT_STACK_INIT_CRITICAL: bool = true;
     const MAX_PRIORITIES: u8 = 7;
     const MINIMAL_STACK_SIZE: usize = 128;
     const MAX_TASK_NAME_LEN: usize = 12;
