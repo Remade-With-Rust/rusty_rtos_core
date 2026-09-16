@@ -185,10 +185,8 @@ scheduler),
 [`rusty_rtos_port`](https://crates.io/crates/rusty_rtos_port) (the architecture
 seam),
 [`rusty_rtos_heap`](https://crates.io/crates/rusty_rtos_heap) (the allocators),
-[`rusty_rtos-capi`](https://github.com/Remade-With-Rust/rusty_rtos-capi) (the C
-ABI) and
-[`rusty_rtos_demo`](https://github.com/Remade-With-Rust/rusty_rtos_demo) (the
-conformance corpus). Also check out the rest of
+`rusty_rtos-capi` (the C ABI, not yet published) and
+`rusty_rtos_demo` (the conformance corpus, not yet published). Also check out the rest of
 **[github.com/remade-with-rust](https://github.com/remade-with-rust)**.
 
 ## About Mata Network
