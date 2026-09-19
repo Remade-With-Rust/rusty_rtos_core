@@ -234,7 +234,7 @@ impl<const N: usize, const L: usize> Lists<N, L> {
         self.set_next(before, item)?;
         self.set_prev(after, item)?;
         let e = self.end_mut(list)?;
-        e.len = e.len.saturating_add(1);
+        e.len = e.len.wrapping_add(1);
         Ok(())
     }
 
@@ -316,7 +316,7 @@ impl<const N: usize, const L: usize> Lists<N, L> {
                 }
                 before = after;
                 after = following;
-                guard = guard.saturating_add(1);
+                guard = guard.wrapping_add(1);
                 if guard > N {
                     return Err(Error::InvalidArgument);
                 }
