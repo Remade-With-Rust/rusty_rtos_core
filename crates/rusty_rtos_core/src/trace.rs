@@ -317,6 +317,91 @@ impl Trace for NoTrace {
     fn event(&mut self, _tick: u64, _event: Event<'_>) {}
 }
 
+/// The events a tickless sleep is allowed to change.
+///
+/// Suppressing ticks does not change WHEN a task runs -- the port winds the
+/// tick count forward over the sleep, so every task still wakes at the tick
+/// it would have woken at. What it changes is that the per-tick heartbeat
+/// stops firing while nothing is due, and that the idle path announces the
+/// sleep it took.
+///
+/// Those three events, and only those three, are what [`Scheduling`] drops.
+#[must_use]
+pub const fn is_suppressible(event: &Event<'_>) -> bool {
+    matches!(
+        event,
+        Event::TaskIncrementTick { .. } | Event::LowPowerIdleBegin | Event::LowPowerIdleEnd
+    )
+}
+
+/// A [`Trace`] that passes on only the events a schedule is made of.
+///
+/// # What this is for
+///
+/// Turning tickless idle on changes a trace, so a raw byte-diff against the C
+/// kernel's cannot survive it -- 15.2% of the conformance corpus is
+/// `TASK_INCREMENT_TICK`. But it does not change the SCHEDULE: a task still
+/// runs at the tick it would have run at, because the port winds the count
+/// forward across the sleep.
+///
+/// This is the projection that says so. Wrap any sink in it and the events
+/// that reach the sink are exactly the ones a correct tickless port must not
+/// disturb -- so two runs that differ only in whether they slept produce the
+/// same output, and a run that reordered, dropped or added a scheduling
+/// decision does not.
+///
+/// It is a claim about what is being proved, so it is worth being narrow:
+/// [`is_suppressible`] names the three events dropped, and every other event
+/// -- every switch, every list move, every queue and event-group and timer
+/// operation, with its tick stamp -- goes through untouched.
+///
+/// ```
+/// use rusty_rtos_core::trace::{CountTrace, Event, Scheduling, Trace};
+///
+/// let mut projected = Scheduling::new(CountTrace::default());
+/// projected.event(7, Event::TaskIncrementTick { tick: 7 });
+/// projected.event(7, Event::StartingScheduler);
+/// // The tick did not reach the sink; the scheduler start did.
+/// assert_eq!(projected.into_inner().events, 1);
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub struct Scheduling<T: Trace> {
+    inner: T,
+}
+
+impl<T: Trace> Scheduling<T> {
+    /// Project onto `inner`.
+    pub const fn new(inner: T) -> Self {
+        Self { inner }
+    }
+
+    /// The sink back out, to read whatever it collected.
+    #[must_use]
+    pub fn into_inner(self) -> T {
+        self.inner
+    }
+
+    /// The sink, borrowed.
+    pub const fn inner(&self) -> &T {
+        &self.inner
+    }
+}
+
+impl<T: Trace> Trace for Scheduling<T> {
+    // Whatever the sink needs. A projection reads no name of its own.
+    const WANTS_NAMES: bool = T::WANTS_NAMES;
+
+    fn note_exits(&mut self, exits: u64) {
+        self.inner.note_exits(exits);
+    }
+
+    fn event(&mut self, tick: u64, event: Event<'_>) {
+        if !is_suppressible(&event) {
+            self.inner.event(tick, event);
+        }
+    }
+}
+
 /// A sink that counts events, for tests and for the work-count parity rule
 /// ("compare a count before a duration").
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
@@ -348,6 +433,113 @@ impl Trace for CountTrace {
 mod tests {
     use super::*;
     use crate::handle::Handle;
+
+    /// A scripted scenario: a tick heartbeat with scheduling decided around
+    /// it. `ticks` stands for whether the port fired the heartbeat -- which
+    /// is exactly the thing a tickless sleep stops doing.
+    fn play<T: Trace>(sink: &mut T, ticks: bool, switch_at_six: bool) {
+        let a: TaskHandle = Handle::from_parts(1, 1);
+        let b: TaskHandle = Handle::from_parts(2, 1);
+        for tick in 0..8u64 {
+            if ticks {
+                sink.event(tick, Event::TaskIncrementTick { tick });
+                sink.event(tick, Event::LowPowerIdleBegin);
+                sink.event(tick, Event::LowPowerIdleEnd);
+            }
+            if tick == 6 && !switch_at_six {
+                continue;
+            }
+            if tick % 2 == 0 {
+                sink.event(tick, Event::TaskSwitchedOut { task: a, name: "A" });
+                sink.event(tick, Event::TaskSwitchedIn { task: b, name: "B" });
+            } else {
+                sink.event(tick, Event::MovedTaskToReadyState { task: a, name: "A" });
+            }
+        }
+    }
+
+    fn projected(ticks: bool, switch_at_six: bool) -> CountTrace {
+        let mut sink = Scheduling::new(CountTrace::default());
+        play(&mut sink, ticks, switch_at_six);
+        sink.into_inner()
+    }
+
+    /// The property the whole tickless claim rests on: a run that slept
+    /// through its ticks and a run that did not project to the SAME thing.
+    ///
+    /// This is what lets a tickless port be gated at all. A raw trace diff
+    /// cannot survive tick suppression -- 15.2% of the conformance corpus is
+    /// `TASK_INCREMENT_TICK` -- and this says precisely which part of the
+    /// trace is allowed to move and which is not.
+    #[test]
+    fn the_projection_is_invariant_under_tick_suppression() {
+        let with = projected(true, true);
+        let without = projected(false, true);
+
+        assert_eq!(
+            with, without,
+            "suppressing the heartbeat changed the projected schedule"
+        );
+        assert_eq!(
+            with.ticks, 0,
+            "a tick reached the sink through the projection"
+        );
+        assert_eq!(with.switches, 4, "the switches are what must survive");
+    }
+
+    /// And it is not invariant under anything else -- the poison for the test
+    /// above. Take one scheduling decision away and the projection says so.
+    #[test]
+    fn the_projection_is_not_invariant_under_a_lost_switch() {
+        let whole = projected(true, true);
+        let poisoned = projected(true, false);
+
+        assert_ne!(
+            whole, poisoned,
+            "a dropped context switch survived the projection, which would              make the tickless gate blind to the thing it exists to catch"
+        );
+    }
+
+    /// The boundary, named rather than implied: three events are suppressible
+    /// and every other kind goes through. A variant added on the wrong side of
+    /// this line would silently widen what a tickless port is allowed to
+    /// change.
+    #[test]
+    fn exactly_three_event_kinds_are_suppressible() {
+        let t: TaskHandle = Handle::from_parts(1, 1);
+
+        for event in [
+            Event::TaskIncrementTick { tick: 0 },
+            Event::LowPowerIdleBegin,
+            Event::LowPowerIdleEnd,
+        ] {
+            assert!(
+                is_suppressible(&event),
+                "{} should be suppressible",
+                event.name()
+            );
+        }
+
+        for event in [
+            Event::StartingScheduler,
+            Event::TaskSwitchedIn { task: t, name: "A" },
+            Event::TaskSwitchedOut { task: t, name: "A" },
+            Event::MovedTaskToReadyState { task: t, name: "A" },
+            Event::MovedTaskToDelayedList { task: t, name: "A" },
+            Event::TaskDelete { task: t, name: "A" },
+            Event::TaskDelay {
+                task: t,
+                name: "A",
+                ticks: 1,
+            },
+        ] {
+            assert!(
+                !is_suppressible(&event),
+                "{} is part of the schedule and must not be suppressible",
+                event.name()
+            );
+        }
+    }
 
     #[test]
     fn names_are_the_c_macro_suffixes() {
