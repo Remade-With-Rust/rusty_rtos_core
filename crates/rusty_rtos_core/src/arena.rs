@@ -121,9 +121,6 @@ impl<K: Kind, T, const N: usize> Arena<K, T, N> {
     /// The object `handle` names.
     #[must_use]
     pub fn get(&self, handle: Handle<K>) -> Option<&T> {
-        if handle.is_null() {
-            return None;
-        }
         let slot = self.slots.get(usize::from(handle.index()))?;
         if slot.generation != handle.generation() {
             return None;
@@ -134,14 +131,23 @@ impl<K: Kind, T, const N: usize> Arena<K, T, N> {
     /// The object `handle` names, mutably.
     #[must_use]
     pub fn get_mut(&mut self, handle: Handle<K>) -> Option<&mut T> {
-        if handle.is_null() {
-            return None;
-        }
         let slot = self.slots.get_mut(usize::from(handle.index()))?;
         if slot.generation != handle.generation() {
             return None;
         }
         slot.value.as_mut()
+    }
+
+    /// Why a handle that did not resolve did not resolve.
+    ///
+    /// Only the two error arms call this, so asking costs nothing on a
+    /// lookup that succeeds -- which is all but a vanishing few of them.
+    fn why(handle: Handle<K>) -> Error {
+        if handle.is_null() {
+            Error::InvalidHandle
+        } else {
+            Error::Gone
+        }
     }
 
     /// Like [`Arena::get`], but says why: [`Error::InvalidHandle`] for the
@@ -151,17 +157,14 @@ impl<K: Kind, T, const N: usize> Arena<K, T, N> {
     /// # Errors
     /// As above.
     pub fn resolve(&self, handle: Handle<K>) -> Result<&T> {
-        if handle.is_null() {
-            return Err(Error::InvalidHandle);
-        }
         let slot = self
             .slots
             .get(usize::from(handle.index()))
             .ok_or(Error::InvalidHandle)?;
         if slot.generation != handle.generation() {
-            return Err(Error::Gone);
+            return Err(Self::why(handle));
         }
-        slot.value.as_ref().ok_or(Error::Gone)
+        slot.value.as_ref().ok_or_else(|| Self::why(handle))
     }
 
     /// Like [`Arena::resolve`], mutably.
@@ -169,26 +172,20 @@ impl<K: Kind, T, const N: usize> Arena<K, T, N> {
     /// # Errors
     /// As [`Arena::resolve`].
     pub fn resolve_mut(&mut self, handle: Handle<K>) -> Result<&mut T> {
-        if handle.is_null() {
-            return Err(Error::InvalidHandle);
-        }
         let slot = self
             .slots
             .get_mut(usize::from(handle.index()))
             .ok_or(Error::InvalidHandle)?;
         if slot.generation != handle.generation() {
-            return Err(Error::Gone);
+            return Err(Self::why(handle));
         }
-        slot.value.as_mut().ok_or(Error::Gone)
+        slot.value.as_mut().ok_or_else(|| Self::why(handle))
     }
 
     /// Remove the object `handle` names, invalidating the handle and every
     /// copy of it.
     #[must_use]
     pub fn remove(&mut self, handle: Handle<K>) -> Option<T> {
-        if handle.is_null() {
-            return None;
-        }
         let slot = self.slots.get_mut(usize::from(handle.index()))?;
         if slot.generation != handle.generation() {
             return None;
