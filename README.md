@@ -6,11 +6,10 @@
 [![docs.rs](https://docs.rs/rusty_rtos_core/badge.svg)](https://docs.rs/rusty_rtos_core)
 [![license](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
 
-The shared vocabulary of **Kairos** — FreeRTOS remade in Rust. Ticks,
-priorities, generational handles, `list.c` remade over indices, `FreeRTOSConfig.h`
-as a trait, and the four seams every other package is generic over. No C, no FFI,
-no pointers, no allocator, no architecture. `#![forbid(unsafe_code)]`, `no_std`,
-zero dependencies, MIT OR Apache-2.0.
+The shared vocabulary of Kairos. Ticks, priorities, generational handles,
+`list.c` remade over indices, `FreeRTOSConfig.h` as a trait, and the four seams
+every other package is generic over. No C, no FFI, no pointers, no allocator,
+no architecture.
 
 - **The types**: `Tick<W>` at 16/32/64 bits with the wrapping and overflow
   rules `xTickCount` follows; `Priority` validated against the config;
