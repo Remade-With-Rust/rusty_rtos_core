@@ -75,6 +75,19 @@ pub trait Config {
     const CHECK_FOR_STACK_OVERFLOW: u8 = 2;
     /// `configNUMBER_OF_CORES`.
     const NUMBER_OF_CORES: u8 = 1;
+    /// `configUSE_TICKLESS_IDLE`.
+    ///
+    /// Off, as the C's default is off. On, the idle task asks how long it may
+    /// sleep and hands that to [`crate::port::Port::suppress_ticks_and_sleep`];
+    /// off, the whole path compiles away and the kernel is byte-identical to
+    /// what it was.
+    ///
+    /// Turning it on does not change WHEN a task runs -- the tick count is
+    /// wound forward across the sleep -- but it does stop the per-tick
+    /// heartbeat firing, so a raw trace diff cannot gate it.
+    /// [`crate::trace::Scheduling`] is the projection that can.
+    const USE_TICKLESS_IDLE: bool = false;
+
     /// `configEXPECTED_IDLE_TIME_BEFORE_SLEEP`, in ticks (tickless idle).
     const EXPECTED_IDLE_TIME_BEFORE_SLEEP: u64 = 2;
     /// `configTOTAL_HEAP_SIZE`, for `rusty_rtos_heap`'s region, in bytes.

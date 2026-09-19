@@ -81,9 +81,28 @@ pub trait Port {
     /// sim, deliver the next tick per the sim contract.
     fn idle(&self) {}
 
-    /// `portSUPPRESS_TICKS_AND_SLEEP(x)` for tickless idle; the default is
-    /// the C default, a no-op that keeps the tick running.
-    fn suppress_ticks_and_sleep(&self, _expected_idle_ticks: u64) {}
+    /// `portSUPPRESS_TICKS_AND_SLEEP(x)` for tickless idle.
+    ///
+    /// The kernel has established that nothing is runnable for
+    /// `expected_idle_ticks` and suspended the scheduler. A port may sleep
+    /// for up to that long and **returns how many ticks it actually slept**,
+    /// which the kernel winds the tick count forward by. Returning zero
+    /// declines, and is the default: a port that has not implemented this
+    /// keeps its tick running and nothing about the schedule changes.
+    ///
+    /// Returning MORE than asked is a port bug, and the kernel clamps rather
+    /// than trusting it -- winding the clock past a task's wake time would
+    /// lose the wake, where losing the extra sleep is recoverable.
+    ///
+    /// `configPRE_SLEEP_PROCESSING` and `configPOST_SLEEP_PROCESSING` belong
+    /// in an implementation of this, which is where the C puts them too.
+    /// `configPRE_SUPPRESS_TICKS_AND_SLEEP_PROCESSING` does not:
+    /// [`crate::hooks::Hooks::pre_suppress_ticks`] declares it and the kernel
+    /// has no `Hooks` seam to reach it through, so the veto is not wired yet.
+    /// A port that wants one declines by returning zero.
+    fn suppress_ticks_and_sleep(&self, _expected_idle_ticks: u64) -> u64 {
+        0
+    }
 
     // ----------------------------------------------------- the tick source --
     //
