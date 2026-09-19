@@ -371,7 +371,9 @@ impl<const N: usize, const L: usize> Lists<N, L> {
         if e.cursor == item {
             e.cursor = prev;
         }
-        e.len = e.len.saturating_sub(1);
+        // Wrapping: this is reached only after the item was found in
+        // this list and unlinked from it, so the length is at least one.
+        e.len = e.len.wrapping_sub(1);
         Ok(usize::from(e.len))
     }
 
@@ -491,7 +493,8 @@ impl<const N: usize, const L: usize> Iterator for Iter<'_, N, L> {
             return None;
         }
         let item = self.at?;
-        self.remaining = self.remaining.saturating_sub(1);
+        // Wrapping: the guard four lines up returned on zero.
+        self.remaining = self.remaining.wrapping_sub(1);
         self.at = self.lists.next(item).ok().flatten();
         Some(item)
     }

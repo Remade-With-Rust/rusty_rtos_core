@@ -113,7 +113,9 @@ impl<K: Kind, T, const N: usize> Arena<K, T, N> {
         }
         slot.generation = generation;
         slot.value = Some(value);
-        self.len = self.len.saturating_add(1);
+        // Wrapping: a free slot was found, so the arena is not full and
+        // the count is below `N`.
+        self.len = self.len.wrapping_add(1);
         // `index < N <= MAX_INDEX`, so the conversion cannot truncate.
         Ok(Handle::from_parts(index as u16, generation))
     }
@@ -194,7 +196,9 @@ impl<K: Kind, T, const N: usize> Arena<K, T, N> {
         // Freeing bumps the generation again (odd -> even), so the old
         // handle can never match a future occupant.
         slot.generation = slot.generation.wrapping_add(1);
-        self.len = self.len.saturating_sub(1);
+        // Wrapping: `take` above answered `Some`, so a live value was
+        // here and the count is at least one.
+        self.len = self.len.wrapping_sub(1);
         Some(value)
     }
 
