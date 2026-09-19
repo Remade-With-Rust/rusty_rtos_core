@@ -291,6 +291,17 @@ pub trait Trace {
     /// that does not care ignores it, and the call compiles away.
     fn note_exits(&mut self, _exits: u64) {}
 
+    /// Whether this sink reads the `name` an event carries.
+    ///
+    /// Building one costs a UTF-8 validation -- the bytes were checked when
+    /// the name was set, and a `&str` has to have them checked again -- which
+    /// a sink that only counts, or drops, events never looks at. Saying so
+    /// lets the kernel skip it.
+    ///
+    /// Defaulted to `true`, so a sink that says nothing behaves exactly as it
+    /// did and every existing implementation keeps compiling.
+    const WANTS_NAMES: bool = true;
+
     /// An event, at the kernel's current tick count.
     fn event(&mut self, tick: u64, event: Event<'_>);
 }
@@ -300,6 +311,9 @@ pub trait Trace {
 pub struct NoTrace;
 
 impl Trace for NoTrace {
+    // Nothing is read, so nothing needs building.
+    const WANTS_NAMES: bool = false;
+
     fn event(&mut self, _tick: u64, _event: Event<'_>) {}
 }
 
@@ -316,6 +330,9 @@ pub struct CountTrace {
 }
 
 impl Trace for CountTrace {
+    // Only the count is kept, so the name is never read.
+    const WANTS_NAMES: bool = false;
+
     fn event(&mut self, _tick: u64, event: Event<'_>) {
         self.events = self.events.saturating_add(1);
         match event {
