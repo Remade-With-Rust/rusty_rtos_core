@@ -69,25 +69,39 @@ run() {
     printf '%-12s %12s   %s\n' "$label" "$n" "$(echo "$txt" | head -1)"
 }
 
-# ---- PINNED, 2026-09-19, and the finding that came with it ----------------
+# ---- PINNED, 2026-09-19 ---------------------------------------------------
 #
-#   key   Node size        x86_64        i686
-#   u16      8 = 2^3   18,365,152  19,994,581
-#   u64     16 = 2^4   18,769,212  21,528,560
-#   u32     12            20,039,224  22,400,584
+#   key   Node size        x86_64        i686      vs the u64 default
+#   u16      8 bytes   18,333,152  19,896,655      -1.41%   -5.21%
+#   u64     16 bytes   18,595,310  20,990,785       base     base
+#   u32     12 bytes   19,395,334  22,176,946      +4.30%   +5.65%
 #
-# THE NARROW KEY IS NOT MONOTONE IN WIDTH, and the obvious choice is the
-# worst one. A `u32` key is +6.8% on x86-64 and +4.0% on i686 against the
-# `u64` it was supposed to beat, while a `u16` key is -2.2% and -7.1%.
+# THE NARROW KEY IS NOT MONOTONE IN WIDTH, and the obvious choice for a
+# 32-bit kernel is the worst of the three. A `u32` key was supposed to be the
+# win -- every Kairos target is 32-bit, where a 64-bit compare costs two
+# instructions -- and it is +4.3% and +5.7% against the `u64` it was meant to
+# beat, while `u16` is -1.4% and -5.2%.
 #
-# Width is not the lever; the node's SIZE is. `Node<u64>` lays out as 16
-# bytes and `Node<u16>` as 8 -- both powers of two, so `items[i]` is a shift.
-# `Node<u32>` is 4 + 2 + 2 + 1 = 9, rounded to 12, and 12 is the one size
-# that needs a multiply. Every single node access pays it, and on this
-# workload that outweighs the narrower compare it was bought for.
+# TWO mechanisms were proposed for that ordering. BOTH were refuted by their
+# own predictions, and the ordering outlived both:
 #
-# A ceiling probe on core-ir had read -5.12% for the same idea. It was
-# measuring something else.
+#   * "It is the power-of-two stride" (16 and 8 index by a shift, 12 by a
+#     multiply). Then padding `Node<u32>` to 16 bytes should recover it on
+#     both machines. Measured: +3.5% on x86-64 and -3.15% on i686 -- OPPOSITE
+#     SIGNS -- and even the arm it helped stayed +0.77% behind u64. Worse,
+#     forcing `Node<u16>` to 16 bytes read +14.1% and landed WORSE than
+#     `Node<u64>` at the identical 16-byte stride, which stride cannot
+#     explain at all.
+#   * "It is `Lists::new()`, whose cost scales with the node SIZE, charged
+#     2,000 times by a rep loop that rebuilt the structure." That one was a
+#     genuine defect in THIS instrument and it is fixed -- construction is
+#     hoisted, and it was worth 0.2% to 3.2% depending on the arm. The table
+#     above is what survived the fix. Not the explanation either.
+#
+# So the ordering is measured and its mechanism is NOT known. It is recorded
+# that way deliberately. A wrong mechanism in a comment is worse than an
+# admitted gap, because the next person optimises against it -- which is
+# exactly how the -5.12% that started this thread came to be believed.
 echo "--- list-ir: instructions, checksum ---"
 run ""       ""                         "x86_64-u64"
 run "narrow" ""                         "x86_64-u32"

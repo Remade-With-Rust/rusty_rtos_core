@@ -88,8 +88,24 @@ fn main() {
     let mut refused = 0u64;
     let mut checksum = 0u64;
 
+    // ONE construction, not 2,000.
+    //
+    // `Lists::new()` writes every one of the N nodes, so its cost scales with
+    // the node's SIZE -- and a rep loop that rebuilds the structure charges
+    // that to every arm in proportion to a quantity the arms are supposed to
+    // differ in. With the construction inside the loop, forcing a `u16` node
+    // from 8 bytes to 16 read +14.1%, and a 16-byte `u16` node came out WORSE
+    // than a 16-byte `u64` one, which no theory of node access can explain
+    // and an odd-shaped `[u8; 9]` memcpy explains immediately.
+    //
+    // A kernel builds its lists once at boot and then runs forever. This
+    // measures that: the steady state, with construction amortised to
+    // nothing. Every rep leaves every list empty again, so the reps stay
+    // independent -- the checksum and the anchors are the proof, and they
+    // are unchanged from the per-rep-construction version.
+    let mut lists = Lists::new();
+
     for _ in 0..REPS {
-        let mut lists = Lists::new();
 
         for (o, order) in ORDERS.iter().enumerate() {
             let list = (o % LISTS) as u8;
