@@ -421,6 +421,46 @@ impl<V: ListValue, const N: usize, const L: usize> ListsOf<V, N, L> {
         }
     }
 
+    /// Is `link` the end marker of `list`?
+    ///
+    /// Two spellings, chosen by pointer width, because they are the same
+    /// question and they do NOT measure the same. A link handed to one of
+    /// these call sites belongs to `list`, so "is it a marker" and "is it
+    /// THIS list's marker" cannot disagree -- `is_end` is a compare against
+    /// a constant, `== end_of(list)` has to build `END_BASE + list` first.
+    ///
+    /// The cheap-looking one is cheaper only on 32-bit. Measured on
+    /// `bench/sweep.sh`, spelling every site `is_end`:
+    ///
+    /// | arm | delta |
+    /// |---|---|
+    /// | list-ir i686 | **-1.78%** |
+    /// | ksched-ir | -0.55% |
+    /// | kdelay-ir | +0.03% |
+    /// | list-ir x86-64 | **+3.81%** |
+    ///
+    /// Every Kairos target is 32-bit, and the x86-64 arm is a host this
+    /// crate does not ship to -- but `rusty_rtos_core` is a general `no_std`
+    /// crate, so a 3.81% regression there is somebody's real cost. Each
+    /// width gets the form it measures better with.
+    ///
+    /// The price is a second path. It is one `const fn` with no state, both
+    /// arms are exercised by the same tests on whichever host runs them, and
+    /// the numbers above are here so the next person can re-take them rather
+    /// than re-derive the reasoning.
+    #[cfg(target_pointer_width = "32")]
+    #[inline]
+    const fn is_marker_of(link: u16, _list: ListId) -> bool {
+        Self::is_end(link)
+    }
+
+    /// See the 32-bit twin.
+    #[cfg(not(target_pointer_width = "32"))]
+    #[inline]
+    const fn is_marker_of(link: u16, list: ListId) -> bool {
+        link == Self::end_of(list)
+    }
+
     fn end(&self, list: ListId) -> Result<&End> {
         self.ends
             .get(usize::from(list))
@@ -503,9 +543,8 @@ impl<V: ListValue, const N: usize, const L: usize> ListsOf<V, N, L> {
         // Two comparisons replace up to two bounds-checked lookups and two
         // marker tests, and the writes ride a lookup that was happening
         // anyway.
-        let end = Self::end_of(list);
-        let before_is_end = before == end;
-        let after_is_end = after == end;
+        let before_is_end = Self::is_marker_of(before, list);
+        let after_is_end = Self::is_marker_of(after, list);
         if !before_is_end {
             self.item_mut(before)?.next = item;
         }
@@ -636,7 +675,7 @@ impl<V: ListValue, const N: usize, const L: usize> ListsOf<V, N, L> {
             let e = self.end(list)?;
             (e.cursor, e.prev)
         };
-        let before = if cursor == Self::end_of(list) {
+        let before = if Self::is_marker_of(cursor, list) {
             tail
         } else {
             self.item(cursor)?.prev
