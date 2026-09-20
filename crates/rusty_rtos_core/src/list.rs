@@ -114,6 +114,29 @@
 //! Measure on all four instruments -- list-ir at both widths, kdelay-ir,
 //! ksched-ir -- and believe those.
 //!
+//! ## Where the fifth pass stopped, and why
+//!
+//! Two more, after the gated pair landed:
+//!
+//! | tried | verdict |
+//! |---|---|
+//! | the SAME gated marker test, in `next_round_robin` | **+1.94% i686** |
+//! | `Iter::remaining` as a `u16` rather than a `usize` | +1.12% x86-64, +2.45% i686 |
+//!
+//! **The first one is this file in one line.** `is_marker_of` is the helper
+//! that WON -1.78% on i686 in `link_between`. The identical call, in the
+//! neighbouring function, on the same machine, loses 1.94%. Nothing on the
+//! page distinguishes them.
+//!
+//! That is the third pair of neighbours here where one edit flips sign --
+//! after `link_between`/`remove` for the marker fold, and the walk for any
+//! restructuring at all. The file has no transferable structure left: every
+//! remaining edit is a coin flip that costs a four-arm sweep to resolve.
+//! Nine wins against twenty-two refutations across five passes is where it
+//! stopped, and the next instruction is not in here -- on the blocking
+//! workload `kernel.rs` is the larger consumer, and until 2026-09-19 no
+//! instrument had ever made a task block.
+//!
 //! ## The fifth pass: one win, six refutations, and a wall
 //!
 //! The win is the same move as the third pass's three: **delete a call whose
