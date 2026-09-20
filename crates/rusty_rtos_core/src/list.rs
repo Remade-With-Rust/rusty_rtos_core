@@ -413,6 +413,7 @@ impl<V: ListValue, const N: usize, const L: usize> ListsOf<V, N, L> {
     /// [`NONE`] needs no special case: it is `0x7fff` above `END_BASE` and
     /// `L <= u8::MAX`, so the bounds check on `ends` refuses it anyway —
     /// one comparison doing what the old `link != NONE` did with two.
+    #[cfg(target_pointer_width = "32")]
     const fn end_index(link: u16) -> Option<usize> {
         if link >= END_BASE {
             Some(link.wrapping_sub(END_BASE) as usize)
@@ -492,14 +493,42 @@ impl<V: ListValue, const N: usize, const L: usize> ListsOf<V, N, L> {
     /// fields as a tuple, so a caller wanting two of them from two nodes
     /// paid four bounds checks and four end-marker tests for two reads.
     /// That re-reading was most of what put this list at 2.08x `list.c`.
-    fn next_and_value(&self, link: u16) -> Result<(u16, V)> {
-        if let Some(i) = Self::end_index(link) {
-            let e = self.ends.get(i).ok_or(Error::InvalidArgument)?;
-            Ok((e.next, Self::MAX_VALUE))
-        } else {
-            let n = self.item(link)?;
-            Ok((n.next, n.value))
+    fn next_and_value(&self, link: u16, list: ListId) -> Result<(u16, V)> {
+        // Two ways to reach the marker, gated the same way and for the same
+        // reason as [`ListsOf::is_marker_of`] -- and this pair leans the
+        // OTHER way, which is why the gate is not a 32-bit favour.
+        //
+        // The walk never leaves the list it was handed, so `end(list)`
+        // names the marker directly, where `end_index` subtracts `END_BASE`
+        // and wraps the difference in an `Option<usize>` to name the same
+        // struct. Spelling it `end(list)` everywhere measured:
+        //
+        // | arm | delta |
+        // |---|---|
+        // | list-ir x86-64 | **-2.03%** |
+        // | kdelay-ir | **-1.83%** |
+        // | ksched-ir | 0 |
+        // | list-ir i686 | **+7.43%** |
+        //
+        // The parameter is not what costs on i686: an inlined version that
+        // passes nothing reads the same +7.43% to the instruction, and is
+        // +38.6% on x86-64 besides. It is `end(list)` itself.
+        #[cfg(target_pointer_width = "32")]
+        {
+            let _ = list;
+            if let Some(i) = Self::end_index(link) {
+                let e = self.ends.get(i).ok_or(Error::InvalidArgument)?;
+                return Ok((e.next, Self::MAX_VALUE));
+            }
         }
+        #[cfg(not(target_pointer_width = "32"))]
+        {
+            if Self::is_end(link) {
+                return Ok((self.end(list)?.next, Self::MAX_VALUE));
+            }
+        }
+        let n = self.item(link)?;
+        Ok((n.next, n.value))
     }
 
     /// Link `item` between `before` and `after`, in `list`.
@@ -635,10 +664,10 @@ impl<V: ListValue, const N: usize, const L: usize> ListsOf<V, N, L> {
             // so `next_and_value` takes both at once. `after` falls out of
             // the walk, which is why nothing re-reads `before.next` after it.
             let mut before = end;
-            let mut after = self.next_and_value(end)?.0;
+            let mut after = self.next_and_value(end, list)?.0;
             let mut guard = 0usize;
             loop {
-                let (following, after_value) = self.next_and_value(after)?;
+                let (following, after_value) = self.next_and_value(after, list)?;
                 if after_value > value {
                     break;
                 }
