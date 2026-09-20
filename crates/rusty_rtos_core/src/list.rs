@@ -656,18 +656,35 @@ impl<V: ListValue, const N: usize, const L: usize> ListsOf<V, N, L> {
 
     /// The items of `list` from the head, in list order.
     pub fn iter(&self, list: ListId) -> Iter<'_, V, N, L> {
+        // ONE end-marker read. `head()` and `len()` are both `end()`, so
+        // building the iterator used to look the same list up twice for two
+        // fields of the same struct.
+        let (at, remaining) = match self.end(list) {
+            Ok(e) => (e.next, usize::from(e.len)),
+            Err(_) => (NONE, 0),
+        };
         Iter {
             lists: self,
-            at: self.head(list).ok().flatten(),
-            remaining: self.len(list).unwrap_or(0),
+            at,
+            remaining,
         }
     }
 }
 
 /// The items of one list, head first.
+///
+/// `at` is a RAW LINK, not an `Option<ItemId>`, because the list already
+/// carries its own terminator: the end marker. Walking `Option<ItemId>` meant
+/// every step went through [`ListsOf::next`], which re-checks that the item is
+/// in a list -- a question this walk answered when it started -- and then
+/// wraps the answer in a `Result<Option<_>>` for `.ok().flatten()` to
+/// immediately unwrap again. The marker does that job with one comparison.
 pub struct Iter<'a, V: ListValue, const N: usize, const L: usize> {
     lists: &'a ListsOf<V, N, L>,
-    at: Option<ItemId>,
+    /// The next link to visit; an end marker (or [`NONE`]) stops the walk.
+    at: u16,
+    /// The anti-cycle guard, NOT the terminator. A list that pointed at
+    /// itself would otherwise never reach a marker.
     remaining: usize,
 }
 
@@ -675,13 +692,18 @@ impl<V: ListValue, const N: usize, const L: usize> Iterator for Iter<'_, V, N, L
     type Item = ItemId;
 
     fn next(&mut self) -> Option<ItemId> {
-        if self.remaining == 0 {
+        if self.remaining == 0 || self.at >= END_BASE {
             return None;
         }
-        let item = self.at?;
-        // Wrapping: the guard four lines up returned on zero.
+        let item = self.at;
+        // Wrapping: the guard above returned on zero.
         self.remaining = self.remaining.wrapping_sub(1);
-        self.at = self.lists.next(item).ok().flatten();
+        // A link this module wrote out of range is a corrupt list; stop the
+        // walk rather than pretend the rest of it is meaningful.
+        self.at = match self.lists.item(item) {
+            Ok(n) => n.next,
+            Err(_) => NONE,
+        };
         Some(item)
     }
 }
