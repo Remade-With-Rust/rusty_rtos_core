@@ -71,6 +71,16 @@ run() {
 
 # ---- PINNED, 2026-09-19 ---------------------------------------------------
 #
+# CURRENT, at the u64 default:  x86_64 16,781,246   i686 19,230,865
+#
+# Down from 18,595,310 and 20,990,785 (-9.75% and -8.38%) across three wins,
+# all of them the same move: collapse two ADJACENT lookups of the same `End`
+# into one, in `insert_end`, `link_between` and `iter`. See the module doc in
+# list.rs for those and for the six things that looked identical and lost.
+#
+# The width table below was taken at the 18,595,310 baseline. Its RATIOS are
+# what it is for, and they have not been re-taken since:
+#
 #   key   Node size        x86_64        i686      vs the u64 default
 #   u16      8 bytes   18,333,152  19,896,655      -1.41%   -5.21%
 #   u64     16 bytes   18,595,310  20,990,785       base     base
