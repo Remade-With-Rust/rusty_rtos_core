@@ -830,6 +830,31 @@ impl<V: ListValue, const N: usize, const L: usize> ListsOf<V, N, L> {
         }
     }
 
+    /// The LAST item's value, or [`ListsOf::MAX_VALUE`] when the list is
+    /// empty -- the mirror of [`ListsOf::head_value`].
+    ///
+    /// For a list that is kept sorted, this is the largest value in it, and
+    /// that is what it is for: a caller that knows its own list is sorted can
+    /// compare against this and, when its value is at least as large, use
+    /// [`ListsOf::insert_end`] to append in O(1) instead of walking.
+    ///
+    /// The list does NOT check that claim, deliberately. A `sorted` flag
+    /// maintained in here costs every insert and every remove on every list
+    /// -- measured, it turned a 12% stage win into a 5% system loss, because
+    /// a kernel's list traffic is overwhelmingly ready lists that never walk
+    /// anything. The caller that knows the invariant is the caller that
+    /// should spend the comparison.
+    ///
+    /// # Errors
+    /// [`Error::InvalidArgument`] for a list outside `0..L`.
+    pub fn tail_value(&self, list: ListId) -> Result<V> {
+        let prev = self.end(list)?.prev;
+        if Self::is_end(prev) {
+            return Ok(Self::MAX_VALUE);
+        }
+        Ok(self.item(prev)?.value)
+    }
+
     /// Where the round-robin cursor (`pxIndex`) currently sits.
     ///
     /// A diagnostic. When a ready task is never chosen, the question is
