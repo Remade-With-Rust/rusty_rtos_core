@@ -64,6 +64,56 @@
 //! below, which pin the contract the fast path has to preserve and which the
 //! first cut of it broke while measuring -18% and passing everything.
 //!
+//! ## The third pass, continued: three wins and three more refutations
+//!
+//! The wins are all the same shape, and it is not the shape anyone would
+//! have guessed: **collapse two lookups of the same `End` into one**, where
+//! the two sit NEXT TO each other.
+//!
+//! * `insert_end` read `ends[list]` for the cursor and then sent that cursor
+//!   through a general `prev` helper, which reads `ends[list]` again for a
+//!   field the first read already had. -1.15% ksched-ir, -1.19% i686.
+//! * `link_between` wrote the marker through `set_next`/`set_prev`, each of
+//!   which looks `ends[list]` up, and then took it a third time to bump the
+//!   length. -3.80% ksched-ir, -3.47% kdelay-ir, -3.70% x86-64.
+//! * `iter` built itself from `head()` AND `len()`, which are both `end()`,
+//!   and then walked through `next()`, which re-checks that the item is in a
+//!   list and wraps the answer in a `Result<Option<_>>` for `.ok().flatten()`
+//!   to unwrap again. -5.41% x86-64, -5.35% i686, and BIT-IDENTICAL on both
+//!   kernel instruments, because `iter` has one caller up there and it is a
+//!   diagnostic. A win for the crate, not for the kernel; that identity is
+//!   also the proof the change leaked nowhere else.
+//!
+//! The refutations are the reason to distrust every sentence above:
+//!
+//! | tried | verdict |
+//! |---|---|
+//! | the SAME fold in `remove` | +6.18% x86-64, **+10.21% i686**, +2.25% kdelay-ir |
+//! | `head` drops `e.len > 0`, which is provably redundant | **+3.71%** x86-64, +3.48% i686 |
+//! | the sorted flag in `len`'s spare bit rather than a `bool` on `End` | +1,026,042 on the arm it was meant to fix |
+//!
+//! **`remove` is the one to remember.** It is the identical edit to the
+//! `link_between` win -- same five lines, same reasoning -- and it loses by
+//! 10% on the machine the product ships on. It was measured, refuted,
+//! re-measured after `link_between` landed and moved its baseline, and lost
+//! by MORE. The difference is DISTANCE: in `link_between` the folded writes
+//! are adjacent to the length bump and collapse into one access, while in
+//! `remove` the block that clears the item sits between them and the two
+//! flags stay live across it. That is not visible on the page, and the
+//! prediction drawn from one of them was wrong about the other -- in both
+//! directions, on consecutive attempts.
+//!
+//! **`head` is the one that should end the arguing.** `e.len > 0` and
+//! `!is_end(e.next)` cannot disagree -- a list is empty exactly when the
+//! marker is its own `next` -- so one of them is free to delete. Deleting it
+//! cost 3.7%, because `iter` calls `head` AND `len`, and the test being
+//! removed was what let LLVM share work between them.
+//!
+//! So: every local argument about cost in this file has been wrong at least
+//! once, in both directions, including the ones with a proof attached.
+//! Measure on all four instruments -- list-ir at both widths, kdelay-ir,
+//! ksched-ir -- and believe those.
+//!
 //! ## The second pass: one win, six refutations
 //!
 //! The `container` sentinel below was the win. The six are recorded because
