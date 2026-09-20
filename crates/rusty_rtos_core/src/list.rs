@@ -114,6 +114,48 @@
 //! Measure on all four instruments -- list-ir at both widths, kdelay-ir,
 //! ksched-ir -- and believe those.
 //!
+//! ## The fifth pass: one win, six refutations, and a wall
+//!
+//! The win is the same move as the third pass's three: **delete a call whose
+//! body carries its own branch and its own `Result`.**
+//!
+//! * `remove` reached the end marker through `set_next`/`set_prev`, which
+//!   subtract `END_BASE`, wrap the difference in an `Option<usize>`, and
+//!   index `ends` with it. `remove` already knows the list, so `end_mut`
+//!   names the same struct with no arithmetic. -2.04% x86-64, -1.72%
+//!   ksched-ir, -1.06% kdelay-ir, -0.75% i686. Both helpers then died.
+//!
+//! | tried | verdict |
+//! |---|---|
+//! | one `ends[list]` read serving BOTH arms of `insert_inner` | flat |
+//! | the same deletion in `next_and_value`, via a `list` parameter | -2.03% x86-64 / **+7.43% i686** |
+//! | ...the same, inlined so no parameter is passed | **+38.6% x86-64** / +7.43% i686 |
+//! | `head_value` reading straight through instead of via `head` + `value` | -0.12% x86-64 / **+2.09% i686** |
+//! | `insert_inner` passing `Some(value)` to fold the `Option` at both sites | flat |
+//!
+//! **Two walls came out of this, and they are the useful part.**
+//!
+//! **The sorted-insert walk is codegen-fragile. Do not restructure its
+//! body.** Three separate attempts -- breaking on `is_end` instead of on a
+//! fetched `MAX_VALUE`, the same copying fields out instead of borrowing,
+//! and inlining `next_and_value` into it -- cost **+26.9%, +26.9% and
+//! +38.6%** on x86-64. In every one of them the per-step instruction
+//! sequence is provably identical to what it replaced: one compare, one
+//! bounds check, one read, one compare. What moved was loop shape. This is
+//! the most obvious place in the file to optimise and the most expensive
+//! place to try.
+//!
+//! **The i686 arm is the binding constraint, and it is not a formality.**
+//! Three consecutive changes that the host accepted or liked -- two of them
+//! deletions -- were rejected by the 32-bit arm at +7.43%, +7.43% and
+//! +2.09%. Every Kairos target is 32-bit. A host-only harness would have
+//! shipped all three.
+//!
+//! The parameter was NOT the cause of the first two, which is worth saying
+//! because it was the obvious explanation and it was wrong: the inlined
+//! version passes no parameter and reads +7.43% on i686 to the instruction.
+//! What costs there is `end(list)` standing in for `end_index`.
+//!
 //! ## The fourth pass: six refutations and no wins
 //!
 //! Driven off a census this time rather than off reading, and it still went
