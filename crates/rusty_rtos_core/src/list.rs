@@ -33,12 +33,21 @@ pub type ItemId = u16;
 const NONE: u16 = u16::MAX;
 const END_BASE: u16 = 0x8000;
 
+/// `container` when an item is in no list.
+///
+/// A sentinel rather than `Option<ListId>`, because `ListId` is `u8` and has
+/// no niche: the `Option` costs a discriminant byte AND turns every read of
+/// the field into a two-step test. `SIZES_FIT` already asserts
+/// `L <= u8::MAX`, so `u8::MAX` itself can never name a list and is free to
+/// mean "none".
+const NO_LIST: ListId = u8::MAX;
+
 #[derive(Clone, Copy)]
 struct Node {
     prev: u16,
     next: u16,
     value: u64,
-    container: Option<ListId>,
+    container: ListId,
 }
 
 impl Node {
@@ -46,7 +55,7 @@ impl Node {
         prev: NONE,
         next: NONE,
         value: 0,
-        container: None,
+        container: NO_LIST,
     };
 }
 
@@ -221,7 +230,7 @@ impl<const N: usize, const L: usize> Lists<N, L> {
             // The `Busy` check rides the read that is happening anyway, and
             // happens before anything is written — so a refused insert
             // still leaves both lists exactly as it found them.
-            if n.container.is_some() {
+            if n.container != NO_LIST {
                 return Err(Error::Busy);
             }
             if let Some(value) = value {
@@ -229,7 +238,7 @@ impl<const N: usize, const L: usize> Lists<N, L> {
             }
             n.prev = before;
             n.next = after;
-            n.container = Some(list);
+            n.container = list;
         }
         self.set_next(before, item)?;
         self.set_prev(after, item)?;
@@ -261,7 +270,11 @@ impl<const N: usize, const L: usize> Lists<N, L> {
     /// # Errors
     /// [`Error::InvalidArgument`] for an item outside `0..N`.
     pub fn container(&self, item: ItemId) -> Result<Option<ListId>> {
-        Ok(self.item(item)?.container)
+        // The `Option` stays on the PUBLIC surface -- it is what the C's
+        // `listLIST_ITEM_CONTAINER` means and what the kernel matches on.
+        // Only the stored form is a sentinel.
+        let c = self.item(item)?.container;
+        Ok(if c == NO_LIST { None } else { Some(c) })
     }
 
     /// `vListInsert`: put `item` in `list` sorted ascending by `value`,
@@ -354,14 +367,15 @@ impl<const N: usize, const L: usize> Lists<N, L> {
             let n = self.item(item)?;
             (n.prev, n.next, n.container)
         };
-        let Some(list) = container else {
+        if container == NO_LIST {
             return Err(Error::NotActive);
-        };
+        }
+        let list = container;
         self.set_next(prev, next)?;
         self.set_prev(next, prev)?;
         {
             let n = self.item_mut(item)?;
-            n.container = None;
+            n.container = NO_LIST;
             n.prev = NONE;
             n.next = NONE;
         }
@@ -462,7 +476,7 @@ impl<const N: usize, const L: usize> Lists<N, L> {
     /// the item is in no list.
     pub fn next(&self, item: ItemId) -> Result<Option<ItemId>> {
         let n = self.item(item)?;
-        if n.container.is_none() {
+        if n.container == NO_LIST {
             return Err(Error::NotActive);
         }
         Ok((!Self::is_end(n.next)).then_some(n.next))
