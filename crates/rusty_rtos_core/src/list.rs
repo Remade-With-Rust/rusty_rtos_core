@@ -380,9 +380,34 @@ impl<V: ListValue, const N: usize, const L: usize> ListsOf<V, N, L> {
             n.next = after;
             n.container = list;
         }
-        self.set_next(before, item)?;
-        self.set_prev(after, item)?;
+        // The neighbours are items of THIS list or this list's end marker --
+        // never another list's. So whenever one of them is the marker, the
+        // struct `set_next`/`set_prev` would look up is the very one the
+        // length bump below already has to take.
+        //
+        // Both sides, because both happen: `before` is the marker when the
+        // item sorts to the head, `after` is the marker when it sorts to the
+        // tail or carries `portMAX_DELAY` or arrives through `insert_end`
+        // with the cursor unmoved, and BOTH are when the list was empty.
+        // Two comparisons replace up to two bounds-checked lookups and two
+        // marker tests, and the writes ride a lookup that was happening
+        // anyway.
+        let end = Self::end_of(list);
+        let before_is_end = before == end;
+        let after_is_end = after == end;
+        if !before_is_end {
+            self.item_mut(before)?.next = item;
+        }
+        if !after_is_end {
+            self.item_mut(after)?.prev = item;
+        }
         let e = self.end_mut(list)?;
+        if before_is_end {
+            e.next = item;
+        }
+        if after_is_end {
+            e.prev = item;
+        }
         e.len = e.len.wrapping_add(1);
         Ok(())
     }
