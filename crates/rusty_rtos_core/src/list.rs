@@ -1559,24 +1559,43 @@ mod tests {
         assert_eq!(after, 1, "and onto the item the lap returned");
     }
 
-    /// `insert`'s own corruption guard, which is the twin of the one
-    /// `is_sorted` carries -- and which survived mutation for the same
-    /// reason: nothing walked a list long enough to approach it.
+    /// The longest walk `insert` can be made to take, which is a full list
+    /// entered in ascending order.
     ///
-    /// These inserts all take the WALK (each new value is smaller than
-    /// everything already there, so it goes at the head), which is the
-    /// path the guard is on. A `>=` or `==` in place of the `>` trips one
-    /// step early on the last insert and turns a full list into an error.
+    /// # Why this does NOT kill `insert_inner`'s guard, and `is_sorted`'s
+    /// test does kill its own
+    ///
+    /// Both carry `if guard > N { return Err(..) }`. `cargo mutants`
+    /// replaces the `>` with `>=` and with `==`; those die in `is_sorted`
+    /// and survive here, and the difference is how far each walk goes.
+    ///
+    /// `is_sorted` visits every linked item, so on a FULL list its guard
+    /// reaches exactly `N` -- which is the one value `>` and `>=` disagree
+    /// about, and why `is_sorted_does_not_false_alarm_on_a_completely_full_list`
+    /// kills them.
+    ///
+    /// `insert_inner` stops at the node BEFORE the marker, so its guard
+    /// reaches the list's length as it was BEFORE the insert: at most
+    /// `N - 1`, because the `N`th item is the one being inserted. `N - 1`
+    /// is below both thresholds, so no constructible input tells the two
+    /// apart. **They are equivalent mutants**, and the only thing that
+    /// could distinguish them is a cyclic list, which `link_between` does
+    /// not let a caller build.
+    ///
+    /// Written down because the first version of this test claimed to kill
+    /// them and did not even take the walk: it inserted DESCENDING values,
+    /// which land at the head, so the loop broke at the first node and the
+    /// guard never moved at all.
     #[test]
-    fn insert_walks_a_full_list_without_tripping_its_corruption_guard() {
+    fn insert_takes_its_longest_walk_on_a_full_list_entered_in_order() {
         let mut l = Lists::<8, 2>::new();
-        // Descending values: every insert walks the whole list to the head.
+        // ASCENDING: each new value belongs after everything already
+        // linked, so `insert` walks the whole list before placing it.
         for i in 0..8_u16 {
-            let value = u64::from(8 - i) * 10;
-            l.insert(0, i, value)
+            l.insert(0, i, u64::from(i).wrapping_add(1).wrapping_mul(10))
                 .expect("a full list is not a corrupt one");
         }
-        assert_eq!(order(&l, 0).len(), 8);
+        assert_eq!(order(&l, 0), [0, 1, 2, 3, 4, 5, 6, 7]);
         assert!(l.is_sorted(0).unwrap());
     }
 
