@@ -320,4 +320,61 @@ mod tests {
         extern crate std;
         pub type V = std::vec::Vec<(super::Handle<super::Task>, u32)>;
     }
+
+    /// `is_empty` and `contains` are the two cheapest questions an arena
+    /// answers, and `cargo mutants` found both replaceable by a constant
+    /// without any test noticing.
+    #[test]
+    fn is_empty_and_contains_track_what_is_actually_in_there() {
+        let mut a: Arena<Task, u8, 4> = Arena::new();
+        assert!(a.is_empty(), "a new arena is empty");
+
+        let h = a.insert(7).unwrap();
+        assert!(!a.is_empty(), "and is not, once something is in it");
+        assert!(a.contains(h), "the handle it just minted is in there");
+
+        a.remove(h).unwrap();
+        assert!(a.is_empty());
+        assert!(!a.contains(h), "and the handle is not, after the remove");
+    }
+
+    /// `resolve_mut` checks the GENERATION, not just the slot. A stale
+    /// handle whose slot has been reused must not hand out the new
+    /// occupant -- that is the whole reason a handle carries a generation,
+    /// and the check survived mutation until this test existed.
+    #[test]
+    fn resolve_mut_refuses_a_stale_handle_whose_slot_was_reused() {
+        let mut a: Arena<Task, u8, 4> = Arena::new();
+        let first = a.insert(1).unwrap();
+        a.remove(first).unwrap();
+        let second = a.insert(2).unwrap();
+
+        assert_eq!(
+            first.index(),
+            second.index(),
+            "the slot was reused, which is what makes this a real test"
+        );
+        assert!(
+            a.resolve_mut(first).is_err(),
+            "the STALE handle must not reach the new occupant"
+        );
+        assert_eq!(a.resolve_mut(second).map(|v| *v), Ok(2));
+    }
+
+    /// `iter_mut` has to reach every live entry, and be able to change it.
+    #[test]
+    fn iter_mut_reaches_and_can_change_every_live_entry() {
+        let mut a: Arena<Task, u8, 4> = Arena::new();
+        let h1 = a.insert(1).unwrap();
+        let h2 = a.insert(2).unwrap();
+
+        let mut seen = 0_usize;
+        for (_, value) in a.iter_mut() {
+            *value = value.saturating_add(10);
+            seen = seen.saturating_add(1);
+        }
+        assert_eq!(seen, 2, "both entries, not an empty iterator");
+        assert_eq!(a.resolve(h1).copied(), Ok(11));
+        assert_eq!(a.resolve(h2).copied(), Ok(12));
+    }
 }

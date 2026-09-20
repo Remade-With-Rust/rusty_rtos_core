@@ -1483,4 +1483,79 @@ mod tests {
         l.insert(0, 0, l.value(0).unwrap()).unwrap();
         assert_eq!(l.iter(0).collect::<Vec<_>>(), [1, 0]);
     }
+
+    /// `is_sorted` walks under the same corruption guard `insert` does, and
+    /// the guard must not fire on a list that is merely FULL.
+    ///
+    /// `cargo mutants` found this: `guard > N` survived being mutated to
+    /// `>=` and to `==`, because no test built a list long enough to reach
+    /// the guard at all, so every version of it behaved the same. A guard
+    /// nothing ever approaches is a guard nothing is testing.
+    #[test]
+    fn is_sorted_does_not_false_alarm_on_a_completely_full_list() {
+        // Eight items is N for this geometry: the walk touches every one.
+        let mut l = Lists::<8, 2>::new();
+        for i in 0..8_u16 {
+            l.insert_sorted(0, i, u64::from(i) * 10).unwrap();
+        }
+        assert_eq!(order(&l, 0).len(), 8, "every item is linked");
+        assert!(
+            l.is_sorted(0).unwrap(),
+            "a full list is sorted, not corrupt -- the guard must not trip              on the last item"
+        );
+    }
+
+    /// `tail_value` is `MAX_VALUE` on an empty list and the last item's
+    /// value otherwise. The empty answer is the one that matters: it is
+    /// what makes `insert_sorted` take the walk rather than appending into
+    /// nothing, and it is NOT the type's default.
+    #[test]
+    fn tail_value_is_max_when_empty_and_the_last_value_when_not() {
+        let mut l = Lists::<8, 2>::new();
+        assert_eq!(
+            l.tail_value(0),
+            Ok(Lists::<8, 2>::MAX_VALUE),
+            "empty answers MAX, which is the end marker's own value"
+        );
+        assert_ne!(
+            Lists::<8, 2>::MAX_VALUE,
+            u64::default(),
+            "and MAX is not the default, or the test above proves nothing"
+        );
+
+        l.insert_sorted(0, 1, 10).unwrap();
+        l.insert_sorted(0, 2, 20).unwrap();
+        assert_eq!(l.tail_value(0), Ok(20), "the LAST value, not the first");
+    }
+
+    /// `is_empty` tracks the list it is asked about and not some other one.
+    #[test]
+    fn is_empty_follows_inserts_and_removes_on_that_list_alone() {
+        let mut l = Lists::<8, 2>::new();
+        assert_eq!(l.is_empty(0), Ok(true));
+        assert_eq!(l.is_empty(1), Ok(true));
+
+        l.insert_sorted(0, 1, 10).unwrap();
+        assert_eq!(l.is_empty(0), Ok(false));
+        assert_eq!(l.is_empty(1), Ok(true), "list 1 is untouched");
+
+        l.remove(1).unwrap();
+        assert_eq!(l.is_empty(0), Ok(true), "and empty again after the remove");
+    }
+
+    /// `cursor_of` is the diagnostic that answers "did the round robin
+    /// move", so it has to report the marker before any lap and the item
+    /// it landed on afterwards.
+    #[test]
+    fn cursor_of_reports_the_marker_then_the_item_it_lands_on() {
+        let mut l = Lists::<8, 2>::new();
+        l.insert_sorted(0, 1, 10).unwrap();
+        l.insert_sorted(0, 2, 20).unwrap();
+
+        let start = l.cursor_of(0).unwrap();
+        assert_eq!(l.next_round_robin(0).unwrap(), Some(1));
+        let after = l.cursor_of(0).unwrap();
+        assert_ne!(after, start, "one lap moved the cursor off the marker");
+        assert_eq!(after, 1, "and onto the item the lap returned");
+    }
 }
