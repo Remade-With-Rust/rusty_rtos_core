@@ -487,8 +487,22 @@ impl<V: ListValue, const N: usize, const L: usize> ListsOf<V, N, L> {
     pub fn insert_end(&mut self, list: ListId, item: ItemId) -> Result<()> {
         // The cursor is the node we insert before, so it *is* `after` and
         // nothing has to read `before.next` to find it again.
-        let cursor = self.end(list)?.cursor;
-        let before = self.prev_of(cursor)?;
+        //
+        // ONE end read, not two. When the cursor is the marker -- which it is
+        // for a ready list nothing has walked, and again after every lap --
+        // `prev_of(cursor)` IS the marker's own `prev`, a field of the struct
+        // this line already holds. The old shape read `ends[list]` for the
+        // cursor and then sent that cursor back through `prev_of`, which
+        // tests it for marker-ness and reads `ends[list]` a second time.
+        let (cursor, tail) = {
+            let e = self.end(list)?;
+            (e.cursor, e.prev)
+        };
+        let before = if cursor == Self::end_of(list) {
+            tail
+        } else {
+            self.item(cursor)?.prev
+        };
         self.link_between(list, item, before, cursor, None)
     }
 
