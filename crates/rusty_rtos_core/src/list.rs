@@ -855,6 +855,114 @@ impl<V: ListValue, const N: usize, const L: usize> ListsOf<V, N, L> {
         Ok(self.item(prev)?.value)
     }
 
+    /// Whether the list's values do not decrease from head to tail.
+    ///
+    /// `O(n)`, and the reason it is not run on every insert is in
+    /// [`ListsOf::tail_value`]. It exists so that the one promise
+    /// [`ListsOf::insert_sorted`] still asks a caller to make can be
+    /// CHECKED rather than only asserted in prose -- in a unit test, in a
+    /// Kani harness, or in a firmware self-check.
+    ///
+    /// It answers a `Result` rather than panicking on a corrupt list,
+    /// because this crate's contract is that nothing in it panics on any
+    /// input a caller can construct (`tests/no_panic.rs`). That rules out
+    /// the `debug_assert!` this would otherwise have been.
+    ///
+    /// # Errors
+    /// [`Error::InvalidArgument`] for a list outside `0..L`, or for a list
+    /// whose links do not terminate -- the same corruption guard
+    /// [`ListsOf::insert`] walks under.
+    pub fn is_sorted(&self, list: ListId) -> Result<bool> {
+        let end = Self::end_of(list);
+        let (mut node, _) = self.next_and_value(end, list)?;
+        let mut previous: Option<V> = None;
+        let mut guard = 0usize;
+        while !Self::is_marker_of(node, list) {
+            let (following, value) = self.next_and_value(node, list)?;
+            if previous.is_some_and(|p| value < p) {
+                return Ok(false);
+            }
+            previous = Some(value);
+            node = following;
+            guard = guard.wrapping_add(1);
+            if guard > N {
+                return Err(Error::InvalidArgument);
+            }
+        }
+        Ok(true)
+    }
+
+    /// `vListInsert`, taking the `O(1)` append when the value belongs at the
+    /// end instead of walking there.
+    ///
+    /// # What this takes off the caller
+    ///
+    /// The kernel used to spell this out at the call site: read
+    /// [`ListsOf::tail_value`], compare, and on the fast side write the
+    /// value and call [`ListsOf::insert_end`]. That is three separate
+    /// things to get right, and two of them are silent when wrong:
+    ///
+    /// * the comparison must be `>=`, not `>`. `vListInsert` puts a later
+    ///   equal value AFTER the ones already there, which is where appending
+    ///   puts it; `>` sends equals down the walk and reorders wakes that
+    ///   share a tick. **Now in here.**
+    /// * the append must actually append. [`ListsOf::insert_end`] links
+    ///   before the CURSOR, so it appends only while the cursor is still at
+    ///   the marker -- a delayed list's never moves, but nothing in the name
+    ///   says so, and a ready list's moves on every lap. This links between
+    ///   the tail and the marker instead, which appends whatever the cursor
+    ///   is doing. **Gone, not delegated and not checked**: there is no
+    ///   longer a question to get wrong.
+    /// * the list must already be sorted. **Still the caller's**, and
+    ///   [`ListsOf::is_sorted`] is how to check it.
+    ///
+    /// Three promises became one, and the one that is left is the only one
+    /// the list cannot answer for itself without the `sorted` flag that
+    /// [`ListsOf::tail_value`] records as a measured net loss.
+    ///
+    /// It is also FASTER than the call site it replaces -- one end read
+    /// rather than two, and the value written by the link rather than by a
+    /// separate `set_value`, and no cursor is read at all. Measured, two
+    /// real trees, callgrind, work parity held by an identical checksum
+    /// down every column:
+    ///
+    /// | instrument | call site | `insert_sorted` | |
+    /// |---|---:|---:|---:|
+    /// | `kdelay-ir` | 4,024,119 | 3,995,313 | -0.72% |
+    /// | `kdelay-deep` | 4,368,168 | 4,344,745 | -0.54% |
+    /// | `khot-ir` | 14,800,504 | 14,736,516 | -0.43% |
+    /// | `ksched-ir` | 1,790,797 | 1,790,797 | flat |
+    ///
+    /// Worth recording WHY, because the first attempt at this got it
+    /// backwards: a version that kept `insert_end` and TESTED the cursor
+    /// cost +0.09% to +0.19% instead. Removing the question beat checking
+    /// it, on every arm.
+    ///
+    /// # Errors
+    /// As [`ListsOf::insert`].
+    pub fn insert_sorted(&mut self, list: ListId, item: ItemId, value: V) -> Result<()> {
+        let tail = self.end(list)?.prev;
+        let tail_value = if Self::is_end(tail) {
+            Self::MAX_VALUE
+        } else {
+            self.item(tail)?.value
+        };
+        // `>=`, not `>`: `vListInsert` puts a later equal value AFTER the
+        // ones already there, which is exactly where appending puts it.
+        if value >= tail_value {
+            // A TRUE append: linked between the tail and the end marker.
+            //
+            // NOT `insert_end`, which links before the CURSOR and so appends
+            // only while the cursor is still sitting at the marker. Naming
+            // the marker directly makes that question disappear instead of
+            // answering it -- and it writes the value on the way in, where
+            // `insert_end` keeps the item's own and would need a
+            // `set_value` first.
+            return self.link_between(list, item, tail, Self::end_of(list), Some(value));
+        }
+        self.insert(list, item, value)
+    }
+
     /// Where the round-robin cursor (`pxIndex`) currently sits.
     ///
     /// A diagnostic. When a ready task is never chosen, the question is
@@ -1227,6 +1335,124 @@ mod tests {
         // "after everything", and put it last. That is the divergence.
         l.insert(0, 5, 25).unwrap();
         assert_eq!(order(&l, 0), [1, 2, 5, 3, 4]);
+    }
+
+    /// `insert_sorted` appends when the value belongs at the end and walks
+    /// when it does not, and the list is sorted either way.
+    #[test]
+    fn insert_sorted_appends_or_walks_and_stays_sorted() {
+        let mut l = Lists::<8, 2>::new();
+        l.insert_sorted(0, 1, 10).unwrap();
+        l.insert_sorted(0, 2, 20).unwrap();
+        // Belongs at the end: the append path.
+        l.insert_sorted(0, 3, 30).unwrap();
+        assert_eq!(order(&l, 0), [1, 2, 3]);
+        // Belongs in the middle: the walk.
+        l.insert_sorted(0, 4, 15).unwrap();
+        assert_eq!(order(&l, 0), [1, 4, 2, 3]);
+        assert!(l.is_sorted(0).unwrap());
+        // And the value the append wrote is the value the item carries --
+        // `insert_end` keeps the item's own, so a missed `set_value` here
+        // would leave a zero at the tail and only show up as a wake order.
+        assert_eq!(l.value(3).unwrap(), 30);
+    }
+
+    /// The tie rule, which is the promise that is silent when broken.
+    ///
+    /// `vListInsert` puts a later EQUAL value after the ones already there.
+    /// A `>` instead of a `>=` in the append test sends equals down the
+    /// walk, where they land before their equals -- a different wake order
+    /// for tasks that share a tick, and nothing else to see.
+    #[test]
+    fn insert_sorted_puts_a_later_equal_value_after_its_equals() {
+        let mut l = Lists::<8, 2>::new();
+        l.insert_sorted(0, 1, 10).unwrap();
+        l.insert_sorted(0, 2, 20).unwrap();
+        l.insert_sorted(0, 3, 20).unwrap();
+        l.insert_sorted(0, 4, 20).unwrap();
+        assert_eq!(order(&l, 0), [1, 2, 3, 4]);
+
+        // The same three through the plain walk, which is the behaviour the
+        // append has to agree with.
+        let mut w = Lists::<8, 2>::new();
+        w.insert(0, 1, 10).unwrap();
+        w.insert(0, 2, 20).unwrap();
+        w.insert(0, 3, 20).unwrap();
+        w.insert(0, 4, 20).unwrap();
+        assert_eq!(order(&w, 0), order(&l, 0));
+    }
+
+    /// A moved cursor cannot move where `insert_sorted` appends.
+    ///
+    /// This is the guard on the mechanism, not on a caller. `insert_end`
+    /// links before the CURSOR, so an append built on it lands at the tail
+    /// only while the cursor is still at the marker -- which used to be a
+    /// fact the CALLER had to keep in mind, and the one most likely to be
+    /// forgotten, because nothing in the name says "before the cursor".
+    /// `insert_sorted` links between the tail and the marker instead, so
+    /// there is nothing left to remember.
+    ///
+    /// If anyone ever rewrites that append back onto `insert_end`, this is
+    /// the test that fails.
+    #[test]
+    fn insert_sorted_appends_at_the_tail_even_after_the_cursor_has_moved() {
+        let mut l = Lists::<8, 2>::new();
+        l.insert_sorted(0, 1, 10).unwrap();
+        l.insert_sorted(0, 2, 20).unwrap();
+        l.insert_sorted(0, 3, 30).unwrap();
+
+        // One round-robin step: the cursor leaves the marker and sits on
+        // item 1, so `insert_end` would now insert BEFORE item 1 -- at the
+        // head of a list whose values are all smaller.
+        assert_eq!(l.next_round_robin(0).unwrap(), Some(1));
+        l.insert_sorted(0, 4, 40).unwrap();
+
+        // Built on `insert_end` this would read [4, 1, 2, 3]: item 4 linked
+        // before the cursor, at the head of a list whose values are all
+        // smaller. A true append puts it where its value belongs.
+        assert_eq!(order(&l, 0), [1, 2, 3, 4]);
+        assert!(l.is_sorted(0).unwrap());
+    }
+
+    /// The one promise `insert_sorted` still asks a caller to keep, and
+    /// what it costs when it is not kept.
+    ///
+    /// Pinned as a HAZARD, not as desired behaviour: an unsorted list has
+    /// no meaningful tail, so the append puts the value after a smaller
+    /// one and the list stays wrong. `is_sorted` is how a caller finds out
+    /// before trusting it -- which is the whole of what the list can offer
+    /// without the `sorted` flag that `tail_value` records as a net loss.
+    #[test]
+    fn insert_sorted_on_an_unsorted_list_misplaces_and_is_sorted_says_so() {
+        let mut l = Lists::<8, 2>::new();
+        l.insert(0, 1, 10).unwrap();
+        l.insert(0, 2, 20).unwrap();
+        l.insert(0, 3, 30).unwrap();
+
+        // `insert_end` with a small value leaves 10, 20, 30, 5.
+        l.set_value(4, 5).unwrap();
+        l.insert_end(0, 4).unwrap();
+        assert!(!l.is_sorted(0).unwrap(), "the list is unsorted now");
+
+        // 25 against a tail of 5 reads as "after everything", so it is
+        // appended -- where the walk would have put it between 20 and 30.
+        l.insert_sorted(0, 5, 25).unwrap();
+        assert_eq!(order(&l, 0), [1, 2, 3, 4, 5]);
+        assert_eq!(order(&l, 0).len(), 5);
+        assert!(!l.is_sorted(0).unwrap());
+    }
+
+    /// `is_sorted` on the lists the kernel actually keeps sorted.
+    #[test]
+    fn is_sorted_answers_for_empty_single_and_equal_lists() {
+        let mut l = Lists::<8, 2>::new();
+        assert!(l.is_sorted(0).unwrap(), "an empty list is sorted");
+        l.insert_sorted(0, 1, 7).unwrap();
+        assert!(l.is_sorted(0).unwrap(), "one item is sorted");
+        l.insert_sorted(0, 2, 7).unwrap();
+        assert!(l.is_sorted(0).unwrap(), "equal values are non-decreasing");
+        assert!(l.is_sorted(1).unwrap(), "an untouched list is sorted");
+        assert!(l.is_sorted(2).is_err(), "a list outside 0..L is an error");
     }
 
     /// Moving a LINKED item's value reorders the list under it.
