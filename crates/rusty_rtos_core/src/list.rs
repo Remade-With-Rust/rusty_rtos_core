@@ -22,6 +22,34 @@
 //! panics: a wrong index or a double insert is an [`Error`], where the C
 //! kernel would corrupt the list.
 
+//! # Six things that did NOT work, measured (2026-09-19)
+//!
+//! This file has been hammered twice. The second pass landed exactly one win
+//! -- the `container` sentinel below -- and SIX refutations. They are
+//! recorded because every one of them is the obvious next idea:
+//!
+//! | tried | core-ir | ksched-ir |
+//! |---|---|---|
+//! | specialise the walk's first step (the end marker is known) | flat | flat |
+//! | count the insert guard DOWN to zero instead of up to `N` | flat | flat |
+//! | fuse `head_value` so it skips `head`'s `Option<ItemId>` | flat | flat |
+//! | put the ITEM arm first in the four link accessors | flat | flat |
+//! | `#[inline(always)]` on the four leaf accessors | flat | flat |
+//! | one node access in `remove` instead of two | flat | **+6,709** |
+//!
+//! The census invites most of these: `if link >= END_BASE` carries 9.58% of
+//! `core-ir` and `if guard > N` 2.50%. **Neither is removable cost.** Those
+//! are the traversal and the loop, attributed to the first line of an
+//! inlined body -- and reordering the branch or making the test free moves
+//! nothing, which is how you can tell.
+//!
+//! What that leaves: LLVM has already done every local optimisation here, so
+//! only a REPRESENTATION change moves this file. One did. Before reaching
+//! for another, note that the instrument is x86-64 and the product is
+//! 32-bit: `value: u64` is ONE comparison here and TWO on ARMv7-M or Xtensa,
+//! and the insert walk compares it on every step. That cost is real and this
+//! instrument cannot see it.
+
 use crate::error::{Error, Result};
 
 /// One of the `L` lists, `0..L`.
