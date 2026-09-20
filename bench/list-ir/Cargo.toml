@@ -1,0 +1,35 @@
+# Instruction counts for the intrusive lists ALONE.
+#
+# `core-ir` measures the lists and the generational arena together, which is
+# the right shape for a foundation-level gate and the wrong shape for deciding
+# whether a change to `list.rs` paid: roughly half of that count is the arena,
+# so a 4% list win reads as 2% and lands in the same range as a codegen
+# wobble. This instrument removes the dilution and nothing else. `core-ir`
+# stays the gate; this one is the microscope.
+#
+# The `narrow` feature swaps the sort key from `u64` to `u32`. That is not a
+# second workload -- it is the SAME workload at the width a `TickWidth::Bits32`
+# kernel would actually run, and the difference between the two arms is the
+# price of the width.
+[package]
+name = "list-ir"
+version = "0.0.0"
+edition = "2021"
+publish = false
+license = "MIT OR Apache-2.0"
+
+[features]
+default = []
+narrow = []
+tiny = []
+
+[dependencies]
+rusty_rtos_core = { path = "../../crates/rusty_rtos_core", default-features = false }
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+debug = true
+
+[workspace]
