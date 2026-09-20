@@ -22,11 +22,52 @@
 //! panics: a wrong index or a double insert is an [`Error`], where the C
 //! kernel would corrupt the list.
 
-//! # Six things that did NOT work, measured (2026-09-19)
+//! # What has been tried here, measured (2026-09-19)
 //!
-//! This file has been hammered twice. The second pass landed exactly one win
-//! -- the `container` sentinel below -- and SIX refutations. They are
-//! recorded because every one of them is the obvious next idea:
+//! ## The third pass: the tail fast path, and why it is not here
+//!
+//! A sorted list's LAST item carries its largest value, one read away. If the
+//! arriving value is at least as large, the walk was always going to run the
+//! whole list and stop at the marker -- so one comparison replaces `len` of
+//! them. It subsumes the `portMAX_DELAY` branch exactly, and `>=` keeps
+//! `vListInsert`'s rule that a later equal value goes AFTER the ones already
+//! there. It is the right shape for a delayed list, whose wake times are
+//! `now + something` with `now` only increasing, so they arrive ASCENDING.
+//!
+//! On `bench/list-ir` it read **-11.8%** (x86-64) and **-7.7%** (i686).
+//! At the KERNEL level it is a LOSS, and the loss is a function of depth:
+//!
+//! | delayed-list depth | kdelay-ir head | with the fast path |
+//! |---|---|---|
+//! | 4 (what this kernel reaches) | 2,280,288 | 2,389,308 (**+4.78%**) |
+//! | 17 | 2,662,691 | 2,684,102 (**+0.80%**) |
+//!
+//! The penalty shrinks with depth exactly as it should, and it does not
+//! reach zero by 17; extrapolated, break-even is near depth 20. The kernel's
+//! geometry caps tasks at 24 and its own workload parks 4. **So it does not
+//! pay at any depth this kernel can reach**, and a 12% stage-level win is a
+//! 5% system-level loss. That is the "one probe must measure the level above
+//! the change" rule earning its keep.
+//!
+//! Why it costs anything at all: the fast path is only correct on a SORTED
+//! list, `insert_end` (`vListInsertEnd`) does not keep one sorted, and the
+//! kernel mixes both on the pending-ready list. The guard is a flag on
+//! `End`, and maintaining it taxes EVERY insert and remove -- which on a
+//! kernel is overwhelmingly ready-list traffic that never walks anything.
+//! Measured, the guard's *test* is free (identical counts with and without
+//! it); the cost is entirely its upkeep, and moving the flag into a spare
+//! bit of `len` to shrink `End` was worse again.
+//!
+//! **If you come back to this**, the conditions are recorded: a system whose
+//! delayed or timer list routinely holds ~20 entries, `bench/kdelay-ir`
+//! (`--features deep` for depth 17) to price it, and the four ordering tests
+//! below, which pin the contract the fast path has to preserve and which the
+//! first cut of it broke while measuring -18% and passing everything.
+//!
+//! ## The second pass: one win, six refutations
+//!
+//! The `container` sentinel below was the win. The six are recorded because
+//! every one of them is the obvious next idea:
 //!
 //! | tried | core-ir | ksched-ir |
 //! |---|---|---|
@@ -44,11 +85,37 @@
 //! nothing, which is how you can tell.
 //!
 //! What that leaves: LLVM has already done every local optimisation here, so
-//! only a REPRESENTATION change moves this file. One did. Before reaching
-//! for another, note that the instrument is x86-64 and the product is
-//! 32-bit: `value: u64` is ONE comparison here and TWO on ARMv7-M or Xtensa,
-//! and the insert walk compares it on every step. That cost is real and this
-//! instrument cannot see it.
+//! only a REPRESENTATION or an ALGORITHMIC change moves this file. One
+//! representation change did. The algorithmic one above moved the list
+//! instrument a lot and the kernel the wrong way.
+//!
+//! ## The narrow key, which was supposed to be the next win and is not
+//!
+//! `ListsOf<V, N, L>` makes the sort key a parameter -- `TickWidth` offers
+//! 16, 32 and 64 bits, and every Kairos target is a 32-bit machine where a
+//! 64-bit compare is two instructions. The null arm proves the parameter
+//! itself is free: at `V = u64` the count moves 58 instructions on i686 and
+//! 0.013% on x86-64.
+//!
+//! The width is NOT free, and not in the direction anyone predicted:
+//!
+//! | key | `Node` size | x86-64 | i686 |
+//! |---|---|---|---|
+//! | `u16` | 8 | -1.41% | -5.21% |
+//! | `u64` | 16 | base | base |
+//! | `u32` | 12 | **+4.30%** | **+5.65%** |
+//!
+//! The obvious choice for a 32-bit kernel is the worst of the three. Two
+//! mechanisms were proposed and both were refuted by their own predictions:
+//! padding `Node<u32>` to 16 bytes read +3.5% on x86-64 and -3.15% on i686,
+//! OPPOSITE SIGNS, and a `u16` node forced to 16 bytes came out worse than a
+//! `u64` one at the identical stride. The ordering is measured; its
+//! mechanism is not known, and `bench/list-ir/run.sh` says so rather than
+//! guessing a third time.
+//!
+//! So a `Bits16` configuration should name `ListsOf<u16, N, L>` and take the
+//! 5.2%. A `Bits32` one should stay at the `u64` default until somebody
+//! explains the middle row.
 
 use crate::error::{Error, Result};
 
@@ -770,6 +837,106 @@ mod tests {
         assert_eq!(l.head(3), Err(Error::InvalidArgument));
         assert_eq!(l.next(0), Err(Error::NotActive));
         assert_eq!(l.set_value(7, 1), Err(Error::InvalidArgument));
+    }
+
+    /// A value EQUAL to the tail's goes after it.
+    ///
+    /// The ascending test above pins ties in the MIDDLE of a list. This pins
+    /// a tie against the LAST item, which is the case a tail fast path
+    /// decides with a single operator -- `>` instead of `>=` there silently
+    /// reverses two tasks that blocked with the same wake time, and no other
+    /// test in this file would notice.
+    #[test]
+    fn a_value_equal_to_the_tail_goes_after_it() {
+        let mut l = Lists::<8, 2>::new();
+        l.insert(0, 1, 10).unwrap();
+        l.insert(0, 2, 20).unwrap();
+        l.insert(0, 3, 20).unwrap(); // equal to the tail: after it
+        l.insert(0, 4, 21).unwrap(); // above the tail: last
+        l.insert(0, 5, 5).unwrap(); // below the head: first
+        assert_eq!(order(&l, 0), [5, 1, 2, 3, 4]);
+        l.insert(0, 6, Lists::<8, 2>::MAX_VALUE).unwrap();
+        l.insert(0, 7, Lists::<8, 2>::MAX_VALUE).unwrap();
+        assert_eq!(order(&l, 0), [5, 1, 2, 3, 4, 6, 7]);
+    }
+
+    /// The first item of an empty list, at both extremes.
+    ///
+    /// `portMAX_DELAY` and an ordinary value take different arms of
+    /// `insert_inner`, and an empty list is where those arms can disagree
+    /// about which one runs.
+    #[test]
+    fn the_first_item_of_an_empty_list_at_both_extremes() {
+        let mut l = Lists::<8, 2>::new();
+        l.insert(0, 0, Lists::<8, 2>::MAX_VALUE).unwrap();
+        assert_eq!(order(&l, 0), [0]);
+        assert_eq!(l.head(0).unwrap(), Some(0));
+        assert_eq!(l.head_value(0).unwrap(), Lists::<8, 2>::MAX_VALUE);
+        assert_eq!(l.len(0).unwrap(), 1);
+
+        l.insert(1, 1, 7).unwrap();
+        assert_eq!(order(&l, 1), [1]);
+        assert_eq!(l.head_value(1).unwrap(), 7);
+        // Emptied and refilled: the marker must be its own `prev` again.
+        l.remove(1).unwrap();
+        assert!(l.is_empty(1).unwrap());
+        l.insert(1, 2, 3).unwrap();
+        l.insert(1, 3, 1).unwrap();
+        assert_eq!(order(&l, 1), [3, 2]);
+    }
+
+    /// `insert_end` leaves a list UNSORTED, and a later `insert` must still
+    /// give `vListInsert`'s answer on it.
+    ///
+    /// **This is the test this file did not have, and the gap was not
+    /// hypothetical.** A tail fast path -- conclude "after everything" from
+    /// one comparison against the last item -- measured -18% on `list-ir`
+    /// and passed all 81 tests and the conformance differential while being
+    /// WRONG here, because a wrong order is still a consistent order and
+    /// nothing was looking at a list that had taken both calls.
+    ///
+    /// The kernel reaches this: a task made ready while the scheduler is
+    /// suspended joins the pending-ready list sorted in one path and at the
+    /// end in another.
+    #[test]
+    fn insert_end_leaves_a_list_unsorted_and_insert_still_walks_it() {
+        let mut l = Lists::<8, 2>::new();
+        l.insert(0, 1, 10).unwrap();
+        l.insert(0, 2, 20).unwrap();
+        l.insert(0, 3, 30).unwrap();
+        assert_eq!(order(&l, 0), [1, 2, 3]);
+
+        // `vListInsertEnd` puts item 4 before the cursor, which is still the
+        // marker, so it lands at the tail carrying a value of 5. The list is
+        // now 10, 20, 30, 5 -- and the tail is no longer the largest.
+        l.set_value(4, 5).unwrap();
+        l.insert_end(0, 4).unwrap();
+        assert_eq!(order(&l, 0), [1, 2, 3, 4]);
+
+        // `vListInsert` of 25 walks from the marker and stops at the first
+        // node whose NEXT value exceeds 25: after item 2, before item 3. A
+        // tail fast path would compare 25 against the tail's 5, conclude
+        // "after everything", and put it last. That is the divergence.
+        l.insert(0, 5, 25).unwrap();
+        assert_eq!(order(&l, 0), [1, 2, 5, 3, 4]);
+    }
+
+    /// Moving a LINKED item's value reorders the list under it.
+    ///
+    /// The kernel always removes before it re-values, but the API does not
+    /// require that, so anything that trusts the order must not trust it
+    /// across this call.
+    #[test]
+    fn set_value_on_a_linked_item_leaves_the_list_unsorted() {
+        let mut l = Lists::<8, 2>::new();
+        l.insert(0, 1, 10).unwrap();
+        l.insert(0, 2, 20).unwrap();
+        l.insert(0, 3, 30).unwrap();
+        // The tail's value drops below the head's, in place: 10, 20, 1.
+        l.set_value(3, 1).unwrap();
+        // The walk stops after item 1, because item 2's 20 exceeds 15.
+        l.insert(0, 4, 15).unwrap();
+        assert_eq!(order(&l, 0), [1, 4, 2, 3]);
     }
 
     #[test]
