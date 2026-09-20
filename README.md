@@ -69,6 +69,28 @@ used, emptied and refilled in between.
 **Still open:** nothing in this crate is timed on a part; the timing rows are
 the kernel's and the port's.
 
+## Tickless idle — the seams, not the policy
+
+This crate owns the four pieces a tickless port is built from, and no policy:
+
+| piece | what it is |
+|---|---|
+| `Config::USE_TICKLESS_IDLE` | `configUSE_TICKLESS_IDLE`. **Off by default**, so a build that ignores it is byte-identical to the C |
+| `Config::EXPECTED_IDLE_TIME_BEFORE_SLEEP` | the sleep floor, 2 ticks |
+| `Port::suppress_ticks_and_sleep` | returns **how many ticks it actually slept**; returning zero declines, and is the default. A port that overclaims is clamped, not trusted |
+| `trace::Scheduling` + `is_suppressible` | the projection: passes every event except the three heartbeat kinds, so the schedule can be compared across a suppressed run |
+
+**One caveat about `Scheduling`, learned on silicon.** Its guarantee covers
+*which* events happen and in *what order*. It does **not** make their tick
+stamps invariant on real hardware, where a tick stamp also records how long the
+work took — and two arms that sleep differently do not take the same time. On a
+simulator, where time is critical-section exits, the stamps are invariant and a
+line-for-line diff is sound. Off it, compare the order and bound the clock
+separately.
+
+Measured: 401 timer interrupts to 0 on QEMU Cortex-M, 400 to 0 on a XIAO
+ESP32-S3, with a byte-identical schedule digest in both arms of each.
+
 ## Using it
 
 ```rust
