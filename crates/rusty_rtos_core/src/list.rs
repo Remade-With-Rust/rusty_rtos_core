@@ -1558,4 +1558,68 @@ mod tests {
         assert_ne!(after, start, "one lap moved the cursor off the marker");
         assert_eq!(after, 1, "and onto the item the lap returned");
     }
+
+    /// `insert`'s own corruption guard, which is the twin of the one
+    /// `is_sorted` carries -- and which survived mutation for the same
+    /// reason: nothing walked a list long enough to approach it.
+    ///
+    /// These inserts all take the WALK (each new value is smaller than
+    /// everything already there, so it goes at the head), which is the
+    /// path the guard is on. A `>=` or `==` in place of the `>` trips one
+    /// step early on the last insert and turns a full list into an error.
+    #[test]
+    fn insert_walks_a_full_list_without_tripping_its_corruption_guard() {
+        let mut l = Lists::<8, 2>::new();
+        // Descending values: every insert walks the whole list to the head.
+        for i in 0..8_u16 {
+            let value = u64::from(8 - i) * 10;
+            l.insert(0, i, value)
+                .expect("a full list is not a corrupt one");
+        }
+        assert_eq!(order(&l, 0).len(), 8);
+        assert!(l.is_sorted(0).unwrap());
+    }
+
+    /// `insert_keeping_value` sorts by the value the item ALREADY carries,
+    /// which is what every event-list insert wants. Nothing tested it, so
+    /// replacing its whole body with `Ok(())` -- linking nothing at all --
+    /// went unnoticed.
+    #[test]
+    fn insert_keeping_value_links_the_item_and_sorts_by_what_it_holds() {
+        let mut l = Lists::<8, 2>::new();
+        l.insert(0, 1, 10).unwrap();
+        l.insert(0, 2, 30).unwrap();
+
+        // Give item 3 its value first, then link it WITHOUT passing one.
+        l.set_value(3, 20).unwrap();
+        l.insert_keeping_value(0, 3).unwrap();
+
+        assert_eq!(
+            order(&l, 0),
+            [1, 3, 2],
+            "it linked the item, and sorted it by the 20 it was carrying"
+        );
+        assert_eq!(l.value(3).unwrap(), 20, "and did not overwrite that value");
+    }
+
+    /// `next` walks one link and stops AT the end marker rather than
+    /// returning it -- the `!` in `(!is_end(next)).then_some(next)`. With
+    /// the `!` deleted the answers invert: `None` in the middle of a list
+    /// and `Some(marker)` at its tail, so a walker would both stop early
+    /// and then run off the end.
+    #[test]
+    fn next_yields_the_successor_and_stops_at_the_tail() {
+        let mut l = Lists::<8, 2>::new();
+        l.insert(0, 1, 10).unwrap();
+        l.insert(0, 2, 20).unwrap();
+        l.insert(0, 3, 30).unwrap();
+
+        assert_eq!(l.next(1), Ok(Some(2)), "the middle of a list has a next");
+        assert_eq!(l.next(2), Ok(Some(3)));
+        assert_eq!(
+            l.next(3),
+            Ok(None),
+            "and the LAST item has none -- not the marker"
+        );
+    }
 }
