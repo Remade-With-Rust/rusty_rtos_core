@@ -114,6 +114,52 @@
 //! Measure on all four instruments -- list-ir at both widths, kdelay-ir,
 //! ksched-ir -- and believe those.
 //!
+//! ## The fourth pass: six refutations and no wins
+//!
+//! Driven off a census this time rather than off reading, and it still went
+//! 0 for 6. Recorded in full because five of the six are ideas that look
+//! obviously correct on the page.
+//!
+//! | tried | verdict |
+//! |---|---|
+//! | split the `self` borrow so `next_round_robin` takes ONE `ends[list]` | flat (-82 on a floor of 82) |
+//! | `.get(i).ok_or(..)?` -> explicit range test + index, in all four accessors | flat (-0.06%) |
+//! | `take_head_before`: fuse `is_empty`+`head`+`value`+`remove` for the tick | **+0.14%** kdelay-ir, +0.12% ksched-ir |
+//! | the insert walk stops at the marker structurally, not via `MAX_VALUE` | **+26.9%** list-ir / **-2.57%** kdelay-ir |
+//! | ...the same, copying fields out instead of holding a `&Node` | bit-identical to the above |
+//!
+//! **Why they all failed, which is one reason.** `&mut self` is `noalias`,
+//! so LLVM has ALREADY shared the reads across these small accessors. Every
+//! one of those changes tried to remove a read the compiler had removed
+//! before it got there, and each added real structure -- a match, an enum
+//! payload, a second loop exit -- that it had not.
+//!
+//! That also explains the three that DID win in the third pass. None of them
+//! removed a read. `insert_end` deleted a call to `prev_of`, `link_between`
+//! deleted two calls to `set_next`/`set_prev`, and `Iter` deleted a call to
+//! `next()`. Each removed a FUNCTION BODY with its own branch and its own
+//! `Result`, which is structure the compiler is not free to invent away.
+//!
+//! **The census led here and was still not enough.** It put 10.4% of
+//! kdelay-ir in `core/src/slice/index.rs` -- larger than any line of this
+//! file -- and that 10.4% is inlined bounds-check code ATTRIBUTED to that
+//! file, not cost anybody can remove: writing the test by hand produced the
+//! same object code. A census attributes cost to a line; it does not say the
+//! cost is removable. This file's own second pass says that, and it was
+//! walked into again anyway.
+//!
+//! **And the walk result is the one to read twice.** Breaking out of the
+//! sorted-insert loop on `is_end(after)` instead of on a `MAX_VALUE` fetched
+//! through `next_and_value` is STRICTLY LESS WORK -- it skips a read of
+//! `ends[list]` and a `(u16, V)` tuple on the last step of every walk that
+//! reaches the end -- and it costs **27%** here while SAVING 2.6% on the
+//! kernel. Reproduced bit-for-bit across four runs and two spellings. The
+//! per-step instruction sequence is identical in both forms, so what moved
+//! is loop shape, not work. It is rejected because a 27% regression on the
+//! crate's own instrument disqualifies a library change whatever the kernel
+//! thinks -- but the kernel half of that trade is real and is the one thing
+//! in four passes that made the delayed list cheaper.
+//!
 //! ## The second pass: one win, six refutations
 //!
 //! The `container` sentinel below was the win. The six are recorded because
