@@ -324,15 +324,6 @@ impl<V: ListValue, const N: usize, const L: usize> ListsOf<V, N, L> {
         }
     }
 
-    /// `prev` of any node.
-    fn prev_of(&self, link: u16) -> Result<u16> {
-        if let Some(i) = Self::end_index(link) {
-            Ok(self.ends.get(i).ok_or(Error::InvalidArgument)?.prev)
-        } else {
-            Ok(self.item(link)?.prev)
-        }
-    }
-
     fn set_next(&mut self, link: u16, next: u16) -> Result<()> {
         if let Some(i) = Self::end_index(link) {
             self.ends.get_mut(i).ok_or(Error::InvalidArgument)?.next = next;
@@ -515,10 +506,12 @@ impl<V: ListValue, const N: usize, const L: usize> ListsOf<V, N, L> {
         //
         // ONE end read, not two. When the cursor is the marker -- which it is
         // for a ready list nothing has walked, and again after every lap --
-        // `prev_of(cursor)` IS the marker's own `prev`, a field of the struct
-        // this line already holds. The old shape read `ends[list]` for the
-        // cursor and then sent that cursor back through `prev_of`, which
-        // tests it for marker-ness and reads `ends[list]` a second time.
+        // the node before the cursor IS the marker's own `prev`, a field of
+        // the struct this line already holds. The old shape read
+        // `ends[list]` for the cursor and then sent that cursor through a
+        // general `prev` helper, which tests it for marker-ness and reads
+        // `ends[list]` a second time. That helper had no other caller and is
+        // gone with it.
         let (cursor, tail) = {
             let e = self.end(list)?;
             (e.cursor, e.prev)
