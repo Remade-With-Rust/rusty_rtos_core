@@ -420,24 +420,6 @@ impl<V: ListValue, const N: usize, const L: usize> ListsOf<V, N, L> {
         }
     }
 
-    fn set_next(&mut self, link: u16, next: u16) -> Result<()> {
-        if let Some(i) = Self::end_index(link) {
-            self.ends.get_mut(i).ok_or(Error::InvalidArgument)?.next = next;
-        } else {
-            self.item_mut(link)?.next = next;
-        }
-        Ok(())
-    }
-
-    fn set_prev(&mut self, link: u16, prev: u16) -> Result<()> {
-        if let Some(i) = Self::end_index(link) {
-            self.ends.get_mut(i).ok_or(Error::InvalidArgument)?.prev = prev;
-        } else {
-            self.item_mut(link)?.prev = prev;
-        }
-        Ok(())
-    }
-
     /// Link `item` between `before` and `after`, in `list`.
     ///
     /// The caller passes `after` because it always already knows it:
@@ -639,8 +621,26 @@ impl<V: ListValue, const N: usize, const L: usize> ListsOf<V, N, L> {
             return Err(Error::NotActive);
         }
         let list = container;
-        self.set_next(prev, next)?;
-        self.set_prev(next, prev)?;
+        // `set_next`/`set_prev` locate the end marker by SUBTRACTING
+        // `END_BASE` from the link and indexing `ends` with the difference,
+        // through an `Option` and a `Result`. Here the list is already in
+        // hand: an item's neighbour is another item or THIS list's marker,
+        // never another list's, so `end_mut(list)` reaches the same struct
+        // without the arithmetic and without the option.
+        //
+        // The writes stay exactly where they were. Moving them DOWN into the
+        // length bump is a different change and it loses -- +6.18% x86-64,
+        // +10.21% i686, measured twice, once on a moved baseline.
+        if Self::is_end(prev) {
+            self.end_mut(list)?.next = next;
+        } else {
+            self.item_mut(prev)?.next = next;
+        }
+        if Self::is_end(next) {
+            self.end_mut(list)?.prev = prev;
+        } else {
+            self.item_mut(next)?.prev = prev;
+        }
         {
             let n = self.item_mut(item)?;
             n.container = NO_LIST;
