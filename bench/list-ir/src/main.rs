@@ -61,7 +61,7 @@ const fn key(v: u32) -> Key {
 }
 
 /// Items and lists, sized as a small kernel configuration would.
-const ITEMS: usize = 24;
+const ITEMS: usize = 32; // SLOTS: 24 items + 8 lists
 const LISTS: usize = 8;
 
 /// Enough repetitions that process startup is noise in the total.

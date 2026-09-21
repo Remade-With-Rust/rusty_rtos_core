@@ -29,7 +29,7 @@ use rusty_rtos_core::list::Lists;
 const REPS: u32 = 3000;
 
 /// Items and lists, sized as a small kernel configuration would.
-const ITEMS: usize = 24;
+const ITEMS: usize = 32; // SLOTS: 24 items + 8 lists
 const LISTS: usize = 8;
 
 /// Arena slots.

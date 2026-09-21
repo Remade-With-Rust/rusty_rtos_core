@@ -325,7 +325,6 @@ impl ListValue for u16 {
 }
 
 const NONE: u16 = u16::MAX;
-const END_BASE: u16 = 0x8000;
 
 /// `container` when an item is in no list.
 ///
@@ -336,45 +335,86 @@ const END_BASE: u16 = 0x8000;
 /// mean "none".
 const NO_LIST: ListId = u8::MAX;
 
+/// How many slots a set of lists needs to hold `items` items and `lists`
+/// lists, rounded UP TO A POWER OF TWO.
+///
+/// The rounding is what makes the list fast, and it is worth saying why
+/// rather than leaving it as an arbitrary-looking constraint. Every link
+/// this module stores is followed with `link & (N - 1)` rather than a
+/// bounds-checked index. LLVM can prove `x & (N - 1) < N` when `N` is a
+/// power of two, so the check folds away and the panic becomes unreachable
+/// rather than suppressed — no `unsafe`, no `get_unchecked`.
+///
+/// Measured on `bench/list-cost`, that mask is worth **4.15 instructions per
+/// list operation** (20.70 -> 16.55). The alternative that needs no rounding
+/// — an exact-size array and `% N` — was measured too and is worse than
+/// either: **27.37**, because LLVM lowers a constant modulo to a
+/// multiply-shift sequence costing more than the branch it replaces.
+///
+/// The price is the slack. `slots_for(7, 7)` is 16 rather than 14, which is
+/// two `Node`s. Quote it as RAM when the trade is being weighed.
+#[must_use]
+pub const fn slots_for(items: usize, lists: usize) -> usize {
+    items.saturating_add(lists).next_power_of_two()
+}
+
+/// One node — and an END MARKER IS ONE TOO.
+///
+/// That is the whole reason this list is fast, and it is what C FreeRTOS
+/// does: `xListEnd` is a `ListItem_t` embedded in `List_t`, so `vListInsert`
+/// walks `pxNext` without ever asking whether it has arrived. A marker here
+/// is a node at the top of the same array carrying [`ListValue::MAX`], so
+/// the ordered walk stops on it by comparing values, which it was doing
+/// anyway.
 #[derive(Clone, Copy)]
 struct Node<V: ListValue> {
-    prev: u16,
-    next: u16,
+    /// `xItemValue`. On a marker this is `V::MAX`, which is `portMAX_DELAY`.
     value: V,
+    /// `pxPrevious`.
+    prev: u16,
+    /// `pxNext`.
+    next: u16,
+    /// `pxContainer`, or [`NO_LIST`]. A marker belongs to no list.
     container: ListId,
 }
 
 impl<V: ListValue> Node<V> {
     const EMPTY: Self = Self {
+        value: V::ZERO,
         prev: NONE,
         next: NONE,
-        value: V::ZERO,
         container: NO_LIST,
     };
 }
 
+/// What a `List_t` keeps beside its `xListEnd`: the round-robin cursor and
+/// the count.
+///
+/// Deliberately NOT in the node array. These two are touched once per
+/// operation; `prev`/`next`/`value` are touched once per link followed.
+/// Keeping them apart stops the walk pulling a cursor and a length it has no
+/// use for through the cache with every step.
 #[derive(Clone, Copy)]
-struct End {
-    /// The end marker's own links (a circular list is never empty of nodes).
-    prev: u16,
-    next: u16,
-    /// `pxIndex`: the cursor `vListInsertEnd` inserts before and the
-    /// round-robin walk advances.
+struct Meta {
+    /// `pxIndex`, the round-robin cursor. Starts at the list's own marker.
     cursor: u16,
+    /// `uxNumberOfItems`.
     len: u16,
 }
 
-/// `N` list items shared by `L` lists, sorted by a key of width `V`.
+/// `N` slots — items first, then one end marker per list — over `L` lists.
+///
+/// **`N` is the SLOT count, not the item count.** It must be a power of two
+/// and larger than `L`; [`slots_for`] computes it. The item capacity is
+/// [`ListsOf::CAPACITY`], which is `N - L`.
 pub struct ListsOf<V: ListValue, const N: usize, const L: usize> {
-    items: [Node<V>; N],
-    ends: [End; L],
+    /// Items in `0..CAPACITY`, then one marker per list.
+    nodes: [Node<V>; N],
+    /// One per list, indexed by [`ListId`].
+    meta: [Meta; L],
 }
 
-/// `N` list items shared by `L` lists, keyed by a 64-bit tick.
-///
-/// The default, and what every existing caller means by `Lists<N, L>`. A
-/// configuration whose `TickWidth` is 16 or 32 bits can name
-/// [`ListsOf`] with a narrower key instead and pay for the width it uses.
+/// The kernel's lists: `u64` values, which is what a tick count is.
 pub type Lists<const N: usize, const L: usize> = ListsOf<u64, N, L>;
 
 impl<V: ListValue, const N: usize, const L: usize> Default for ListsOf<V, N, L> {
@@ -384,182 +424,252 @@ impl<V: ListValue, const N: usize, const L: usize> Default for ListsOf<V, N, L> 
 }
 
 impl<V: ListValue, const N: usize, const L: usize> ListsOf<V, N, L> {
-    /// The end marker's value, `portMAX_DELAY`: an item inserted with this
-    /// value goes last, after every other item of the same value.
+    /// The value an empty list reports, and the one a marker carries.
     pub const MAX_VALUE: V = V::MAX;
 
+    /// How many of the `N` slots can hold items. The rest hold markers.
+    pub const CAPACITY: usize = N.wrapping_sub(L);
+
+    /// `N - 1`. See [`slots_for`] for why this exists.
+    const MASK: usize = N.wrapping_sub(1);
+
     const SIZES_FIT: () = assert!(
-        N < END_BASE as usize && L <= u8::MAX as usize,
-        "at most 32767 items and 255 lists"
+        N.is_power_of_two() && L > 0 && L < N && N <= 0x8000 && L <= u8::MAX as usize,
+        "N must be a power of two, greater than L, at most 32768; use `slots_for`"
     );
 
-    /// `L` empty lists over `N` unlinked items.
+    /// `L` empty lists over `CAPACITY` unlinked items.
     #[must_use]
-    // The one index in this crate: a const fn cannot use `get_mut`, and the
-    // loop condition `l < L` bounds it.
+    // A const fn cannot use `get_mut`, and both loops are bounded by `L`,
+    // which `SIZES_FIT` has just asserted is below `N`.
     #[allow(clippy::indexing_slicing)]
     pub const fn new() -> Self {
         let () = Self::SIZES_FIT;
-        let mut ends = [End {
-            prev: NONE,
-            next: NONE,
+        let mut nodes = [const { Node::EMPTY }; N];
+        let mut meta = [Meta {
             cursor: NONE,
             len: 0,
         }; L];
         let mut l = 0;
         while l < L {
-            let e = END_BASE.wrapping_add(l as u16);
-            ends[l] = End {
-                prev: e,
-                next: e,
-                cursor: e,
+            let at = Self::CAPACITY + l;
+            let marker = at as u16;
+            nodes[at] = Node {
+                // `vListInitialise`: `xListEnd.xItemValue = portMAX_DELAY`.
+                // This is what makes the ordered walk stop here without
+                // anyone testing for it.
+                value: V::MAX,
+                prev: marker,
+                next: marker,
+                container: NO_LIST,
+            };
+            // `pxIndex = &xListEnd`.
+            meta[l] = Meta {
+                cursor: marker,
                 len: 0,
             };
             l = l.wrapping_add(1);
         }
-        Self {
-            items: [const { Node::EMPTY }; N],
-            ends,
-        }
+        Self { nodes, meta }
     }
 
+    /// The slot holding `list`'s end marker.
+    ///
+    /// Only valid once the caller has checked `list` names a list — every
+    /// public entry point does that through [`ListsOf::list_meta`] first.
     const fn end_of(list: ListId) -> u16 {
-        END_BASE.wrapping_add(list as u16)
+        (Self::CAPACITY + list as usize) as u16
     }
 
+    /// Whether a link names a marker rather than an item.
+    ///
+    /// Still needed where a marker has to become `None` on the public
+    /// surface — `head`, `next`, the iterator. NOT needed to follow a link,
+    /// which is the change that pays.
     const fn is_end(link: u16) -> bool {
-        link >= END_BASE
+        link as usize >= Self::CAPACITY
     }
 
-    /// The `ends` subscript for an end-marker link, or `None` for an item.
+    /// Follow an internal link.
     ///
-    /// [`NONE`] needs no special case: it is `0x7fff` above `END_BASE` and
-    /// `L <= u8::MAX`, so the bounds check on `ends` refuses it anyway —
-    /// one comparison doing what the old `link != NONE` did with two.
-    #[cfg(target_pointer_width = "32")]
-    const fn end_index(link: u16) -> Option<usize> {
-        if link >= END_BASE {
-            Some(link.wrapping_sub(END_BASE) as usize)
-        } else {
-            None
+    /// Every link this module stores is a slot index below `N`, so the mask
+    /// changes nothing — and because LLVM can prove `x & (N - 1) < N`, the
+    /// bounds check folds away. See [`slots_for`].
+    #[inline]
+    // The mask is the bound: `x & (N - 1)` cannot reach `N`.
+    #[allow(clippy::indexing_slicing)]
+    fn at(&self, link: u16) -> &Node<V> {
+        &self.nodes[link as usize & Self::MASK]
+    }
+
+    /// As [`ListsOf::at`], mutably.
+    #[inline]
+    #[allow(clippy::indexing_slicing)]
+    fn at_mut(&mut self, link: u16) -> &mut Node<V> {
+        &mut self.nodes[link as usize & Self::MASK]
+    }
+
+    /// A CALLER's item handle, checked once.
+    ///
+    /// This is the only place an `ItemId` is validated, and everything after
+    /// it follows stored links, which are this module's own invariant. A
+    /// marker's slot is deliberately out of range here: an `ItemId` naming
+    /// one would let a caller unlink a list's own end.
+    fn item(&self, item: ItemId) -> Result<&Node<V>> {
+        if usize::from(item) >= Self::CAPACITY {
+            return Err(Error::InvalidArgument);
         }
+        Ok(self.at(item))
     }
 
-    /// Is `link` the end marker of `list`?
-    ///
-    /// Two spellings, chosen by pointer width, because they are the same
-    /// question and they do NOT measure the same. A link handed to one of
-    /// these call sites belongs to `list`, so "is it a marker" and "is it
-    /// THIS list's marker" cannot disagree -- `is_end` is a compare against
-    /// a constant, `== end_of(list)` has to build `END_BASE + list` first.
-    ///
-    /// The cheap-looking one is cheaper only on 32-bit. Measured on
-    /// `bench/sweep.sh`, spelling every site `is_end`:
-    ///
-    /// | arm | delta |
-    /// |---|---|
-    /// | list-ir i686 | **-1.78%** |
-    /// | ksched-ir | -0.55% |
-    /// | kdelay-ir | +0.03% |
-    /// | list-ir x86-64 | **+3.81%** |
-    ///
-    /// Every Kairos target is 32-bit, and the x86-64 arm is a host this
-    /// crate does not ship to -- but `rusty_rtos_core` is a general `no_std`
-    /// crate, so a 3.81% regression there is somebody's real cost. Each
-    /// width gets the form it measures better with.
-    ///
-    /// The price is a second path. It is one `const fn` with no state, both
-    /// arms are exercised by the same tests on whichever host runs them, and
-    /// the numbers above are here so the next person can re-take them rather
-    /// than re-derive the reasoning.
-    #[cfg(target_pointer_width = "32")]
-    #[inline]
-    const fn is_marker_of(link: u16, _list: ListId) -> bool {
-        Self::is_end(link)
+    /// As [`ListsOf::item`], mutably.
+    fn item_mut(&mut self, item: ItemId) -> Result<&mut Node<V>> {
+        if usize::from(item) >= Self::CAPACITY {
+            return Err(Error::InvalidArgument);
+        }
+        Ok(self.at_mut(item))
     }
 
-    /// See the 32-bit twin.
-    #[cfg(not(target_pointer_width = "32"))]
-    #[inline]
-    const fn is_marker_of(link: u16, list: ListId) -> bool {
-        link == Self::end_of(list)
-    }
-
-    fn end(&self, list: ListId) -> Result<&End> {
-        self.ends
+    /// A caller's list handle, checked once.
+    fn list_meta(&self, list: ListId) -> Result<&Meta> {
+        self.meta
             .get(usize::from(list))
             .ok_or(Error::InvalidArgument)
     }
 
-    fn end_mut(&mut self, list: ListId) -> Result<&mut End> {
-        self.ends
+    /// As [`ListsOf::list_meta`], mutably.
+    fn list_meta_mut(&mut self, list: ListId) -> Result<&mut Meta> {
+        self.meta
             .get_mut(usize::from(list))
             .ok_or(Error::InvalidArgument)
     }
 
-    fn item(&self, item: ItemId) -> Result<&Node<V>> {
-        self.items
-            .get(usize::from(item))
-            .ok_or(Error::InvalidArgument)
-    }
-
-    fn item_mut(&mut self, item: ItemId) -> Result<&mut Node<V>> {
-        self.items
-            .get_mut(usize::from(item))
-            .ok_or(Error::InvalidArgument)
-    }
-
-    /// `(next, value)` of any node: what the sorted walk reads per step.
+    /// `xItemValue`.
     ///
-    /// Every one of these helpers takes exactly the fields its caller needs
-    /// from **one** array read. The version this replaced returned all three
-    /// fields as a tuple, so a caller wanting two of them from two nodes
-    /// paid four bounds checks and four end-marker tests for two reads.
-    /// That re-reading was most of what put this list at 2.08x `list.c`.
-    fn next_and_value(&self, link: u16, list: ListId) -> Result<(u16, V)> {
-        // Two ways to reach the marker, gated the same way and for the same
-        // reason as [`ListsOf::is_marker_of`] -- and this pair leans the
-        // OTHER way, which is why the gate is not a 32-bit favour.
-        //
-        // The walk never leaves the list it was handed, so `end(list)`
-        // names the marker directly, where `end_index` subtracts `END_BASE`
-        // and wraps the difference in an `Option<usize>` to name the same
-        // struct. Spelling it `end(list)` everywhere measured:
-        //
-        // | arm | delta |
-        // |---|---|
-        // | list-ir x86-64 | **-2.03%** |
-        // | kdelay-ir | **-1.83%** |
-        // | ksched-ir | 0 |
-        // | list-ir i686 | **+7.43%** |
-        //
-        // The parameter is not what costs on i686: an inlined version that
-        // passes nothing reads the same +7.43% to the instruction, and is
-        // +38.6% on x86-64 besides. It is `end(list)` itself.
-        #[cfg(target_pointer_width = "32")]
-        {
-            let _ = list;
-            if let Some(i) = Self::end_index(link) {
-                let e = self.ends.get(i).ok_or(Error::InvalidArgument)?;
-                return Ok((e.next, Self::MAX_VALUE));
-            }
-        }
-        #[cfg(not(target_pointer_width = "32"))]
-        {
-            if Self::is_end(link) {
-                return Ok((self.end(list)?.next, Self::MAX_VALUE));
-            }
-        }
-        let n = self.item(link)?;
-        Ok((n.next, n.value))
+    /// # Errors
+    ///
+    /// [`Error::InvalidArgument`] if `item` names no item.
+    pub fn value(&self, item: ItemId) -> Result<V> {
+        Ok(self.item(item)?.value)
     }
 
-    /// Link `item` between `before` and `after`, in `list`.
+    /// `listSET_LIST_ITEM_VALUE`.
     ///
-    /// The caller passes `after` because it always already knows it:
-    /// [`Lists::insert`] has just walked to it, and [`Lists::insert_end`]
-    /// inserts before the cursor. Reading `before.next` here again was a
-    /// whole node read per insert for a value the caller had in hand.
+    /// # Errors
+    ///
+    /// [`Error::InvalidArgument`] if `item` names no item.
+    pub fn set_value(&mut self, item: ItemId, value: V) -> Result<()> {
+        self.item_mut(item)?.value = value;
+        Ok(())
+    }
+
+    /// `listLIST_ITEM_CONTAINER`: which list holds this item, if any.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::InvalidArgument`] if `item` names no item.
+    pub fn container(&self, item: ItemId) -> Result<Option<ListId>> {
+        // The `Option` stays on the PUBLIC surface -- it is what the C's
+        // `listLIST_ITEM_CONTAINER` means and what the kernel matches on.
+        // Only the stored form is a sentinel.
+        let c = self.item(item)?.container;
+        Ok(if c == NO_LIST { None } else { Some(c) })
+    }
+
+    /// `vListInsert`: ordered by `value`, after every item that equals it.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::InvalidArgument`] if either handle names nothing,
+    /// [`Error::Busy`] if the item is already in a list.
+    pub fn insert(&mut self, list: ListId, item: ItemId, value: V) -> Result<()> {
+        self.insert_inner(list, item, Some(value))
+    }
+
+    /// `vListInsert` sorting by the value the item already carries.
+    ///
+    /// # Errors
+    ///
+    /// As [`ListsOf::insert`].
+    pub fn insert_keeping_value(&mut self, list: ListId, item: ItemId) -> Result<()> {
+        self.insert_inner(list, item, None)
+    }
+
+    fn insert_inner(&mut self, list: ListId, item: ItemId, keep: Option<V>) -> Result<()> {
+        // The list is checked HERE, before `end_of` turns it into a slot
+        // index. `end_of` does no checking of its own, and a masked index
+        // built from a bad list would name some other list's marker.
+        let _ = self.list_meta(list)?;
+        // `None` means "sort by the value the item already carries", which
+        // is what every event-list insert wants; `link_between` then skips
+        // the write, because there is nothing to change.
+        let value = match keep {
+            Some(v) => v,
+            None => self.item(item)?.value,
+        };
+        let end = Self::end_of(list);
+        let (before, after) = if value == Self::MAX_VALUE {
+            (self.at(end).prev, end)
+        } else {
+            // Walk while the NEXT node's value is <= ours. The marker
+            // carries `MAX_VALUE`, so this stops there at the latest and
+            // NOTHING in the loop tests for the end of the list -- the
+            // comparison the sort needs is the same one that terminates it.
+            let mut before = end;
+            let mut after = self.at(end).next;
+            // A step counter, IN DEBUG BUILDS ONLY.
+            //
+            // The walk cannot outrun a marker carrying `MAX_VALUE`, so in a
+            // list this module has not corrupted the counter is dead code --
+            // and it measured **3.27 instructions per list operation**, which
+            // was the whole difference between 23.07 and 19.80. C FreeRTOS
+            // has no such counter either: `vListInsert` with a damaged
+            // `xListEnd.xItemValue` loops forever, exactly as this would.
+            //
+            // But "loops forever" is a bad way to learn you have broken the
+            // invariant. Poisoning `new()` to give the marker `ZERO` does not
+            // fail the suite, it HANGS it -- measured, exit 124 under a
+            // timeout. So the counter stays where the tests run and leaves
+            // where the kernel ships, which is strictly better than the
+            // oracle rather than merely equal to it.
+            #[cfg(debug_assertions)]
+            let mut guard = 0usize;
+            loop {
+                let node = self.at(after);
+                let (following, after_value) = (node.next, node.value);
+                if after_value > value {
+                    break;
+                }
+                before = after;
+                after = following;
+                #[cfg(debug_assertions)]
+                {
+                    guard = guard.wrapping_add(1);
+                    if guard > N {
+                        return Err(Error::InvalidArgument);
+                    }
+                }
+            }
+            (before, after)
+        };
+        self.link_between(list, item, before, after, keep)
+    }
+
+    /// `vListInsertEnd`: in front of the round-robin cursor.
+    ///
+    /// # Errors
+    ///
+    /// As [`ListsOf::insert`].
+    pub fn insert_end(&mut self, list: ListId, item: ItemId) -> Result<()> {
+        // ONE read of the cursor, and the node before it comes straight from
+        // the cursor's own `prev` -- which is now a plain node read whether
+        // the cursor is an item or the marker, because both are nodes.
+        let cursor = self.list_meta(list)?.cursor;
+        let before = self.at(cursor).prev;
+        self.link_between(list, item, before, cursor, None)
+    }
+
+    /// Link `item` between two slots and bump the length.
     fn link_between(
         &mut self,
         list: ListId,
@@ -583,169 +693,25 @@ impl<V: ListValue, const N: usize, const L: usize> ListsOf<V, N, L> {
             n.next = after;
             n.container = list;
         }
-        // The neighbours are items of THIS list or this list's end marker --
-        // never another list's. So whenever one of them is the marker, the
-        // struct `set_next`/`set_prev` would look up is the very one the
-        // length bump below already has to take.
-        //
-        // Both sides, because both happen: `before` is the marker when the
-        // item sorts to the head, `after` is the marker when it sorts to the
-        // tail or carries `portMAX_DELAY` or arrives through `insert_end`
-        // with the cursor unmoved, and BOTH are when the list was empty.
-        // Two comparisons replace up to two bounds-checked lookups and two
-        // marker tests, and the writes ride a lookup that was happening
-        // anyway.
-        let before_is_end = Self::is_marker_of(before, list);
-        let after_is_end = Self::is_marker_of(after, list);
-        if !before_is_end {
-            self.item_mut(before)?.next = item;
-        }
-        if !after_is_end {
-            self.item_mut(after)?.prev = item;
-        }
-        let e = self.end_mut(list)?;
-        if before_is_end {
-            e.next = item;
-        }
-        if after_is_end {
-            e.prev = item;
-        }
-        e.len = e.len.wrapping_add(1);
+        // UNCONDITIONAL, both of them. A neighbour is an item or this list's
+        // marker and there is no longer any difference between those: both
+        // are nodes in one array. The four marker tests this used to make,
+        // and the two bounds-checked lookups behind them, are gone.
+        self.at_mut(before).next = item;
+        self.at_mut(after).prev = item;
+        let m = self.list_meta_mut(list)?;
+        m.len = m.len.wrapping_add(1);
         Ok(())
     }
 
-    /// The value an item sorts by (`xItemValue`).
+    /// `uxListRemove`: unlink an item and answer how many are left.
     ///
     /// # Errors
-    /// [`Error::InvalidArgument`] for an item outside `0..N`.
-    pub fn value(&self, item: ItemId) -> Result<V> {
-        Ok(self.item(item)?.value)
-    }
-
-    /// Set an item's value (`listSET_LIST_ITEM_VALUE`). Allowed while the
-    /// item is in a list, exactly as in C — the caller re-inserts to re-sort.
     ///
-    /// # Errors
-    /// [`Error::InvalidArgument`] for an item outside `0..N`.
-    pub fn set_value(&mut self, item: ItemId, value: V) -> Result<()> {
-        self.item_mut(item)?.value = value;
-        Ok(())
-    }
-
-    /// The list `item` is in, if any (`listLIST_ITEM_CONTAINER`).
-    ///
-    /// # Errors
-    /// [`Error::InvalidArgument`] for an item outside `0..N`.
-    pub fn container(&self, item: ItemId) -> Result<Option<ListId>> {
-        // The `Option` stays on the PUBLIC surface -- it is what the C's
-        // `listLIST_ITEM_CONTAINER` means and what the kernel matches on.
-        // Only the stored form is a sentinel.
-        let c = self.item(item)?.container;
-        Ok(if c == NO_LIST { None } else { Some(c) })
-    }
-
-    /// `vListInsert`: put `item` in `list` sorted ascending by `value`,
-    /// after every item with an equal value; [`Lists::MAX_VALUE`] goes last.
-    ///
-    /// # Errors
-    /// [`Error::InvalidArgument`] for a bad list or item; [`Error::Busy`] if
-    /// the item is already in a list (C would corrupt both lists).
-    pub fn insert(&mut self, list: ListId, item: ItemId, value: V) -> Result<()> {
-        self.insert_inner(list, item, Some(value))
-    }
-
-    /// `vListInsert` sorting by the value the item already carries.
-    ///
-    /// The event lists want exactly this: a task's event item keeps the
-    /// value its call set, and the caller used to read that value out and
-    /// hand it straight back, so the item was read once to be written with
-    /// what it already held.
-    ///
-    /// # Errors
-    /// As [`Lists::insert`].
-    pub fn insert_keeping_value(&mut self, list: ListId, item: ItemId) -> Result<()> {
-        self.insert_inner(list, item, None)
-    }
-
-    fn insert_inner(&mut self, list: ListId, item: ItemId, keep: Option<V>) -> Result<()> {
-        // `None` means "sort by the value the item already carries", which
-        // is what every event-list insert wants; `link_between` then skips
-        // the write, because there is nothing to change.
-        let value = match keep {
-            Some(v) => v,
-            None => self.item(item)?.value,
-        };
-        let end = Self::end_of(list);
-        let (before, after) = if value == Self::MAX_VALUE {
-            (self.end(list)?.prev, end)
-        } else {
-            // Walk from the end marker while the NEXT node's value is <= ours,
-            // which stops at the marker (MAX_VALUE) at the latest.
-            //
-            // One node read per step, not two: the node whose value decides
-            // the step is also the node whose `next` is the following step's,
-            // so `next_and_value` takes both at once. `after` falls out of
-            // the walk, which is why nothing re-reads `before.next` after it.
-            let mut before = end;
-            let mut after = self.next_and_value(end, list)?.0;
-            let mut guard = 0usize;
-            loop {
-                let (following, after_value) = self.next_and_value(after, list)?;
-                if after_value > value {
-                    break;
-                }
-                before = after;
-                after = following;
-                guard = guard.wrapping_add(1);
-                if guard > N {
-                    return Err(Error::InvalidArgument);
-                }
-            }
-            (before, after)
-        };
-        self.link_between(list, item, before, after, keep)
-    }
-
-    /// `vListInsertEnd`: put `item` in `list` immediately before the cursor,
-    /// so a round-robin walk reaches it last. The item's value is kept.
-    ///
-    /// # Errors
-    /// As [`Lists::insert`].
-    pub fn insert_end(&mut self, list: ListId, item: ItemId) -> Result<()> {
-        // The cursor is the node we insert before, so it *is* `after` and
-        // nothing has to read `before.next` to find it again.
-        //
-        // ONE end read, not two. When the cursor is the marker -- which it is
-        // for a ready list nothing has walked, and again after every lap --
-        // the node before the cursor IS the marker's own `prev`, a field of
-        // the struct this line already holds. The old shape read
-        // `ends[list]` for the cursor and then sent that cursor through a
-        // general `prev` helper, which tests it for marker-ness and reads
-        // `ends[list]` a second time. That helper had no other caller and is
-        // gone with it.
-        let (cursor, tail) = {
-            let e = self.end(list)?;
-            (e.cursor, e.prev)
-        };
-        let before = if Self::is_marker_of(cursor, list) {
-            tail
-        } else {
-            self.item(cursor)?.prev
-        };
-        self.link_between(list, item, before, cursor, None)
-    }
-
-    /// `uxListRemove`: take `item` out of whichever list holds it and return
-    /// how many items that list still has. If the cursor sat on the item, it
-    /// moves to the previous node, as in C.
-    ///
-    /// # Errors
-    /// [`Error::InvalidArgument`] for a bad item; [`Error::NotActive`] if the
-    /// item is in no list.
+    /// [`Error::InvalidArgument`] if `item` names no item,
+    /// [`Error::NotActive`] if it is in no list.
     pub fn remove(&mut self, item: ItemId) -> Result<usize> {
-        // One read takes all three fields. An `ItemId` is never an end
-        // marker, so this goes straight to `items` rather than through the
-        // end-marker test the general helpers have to make.
+        // One read takes all three fields, and checks the handle once.
         let (prev, next, container) = {
             let n = self.item(item)?;
             (n.prev, n.next, n.container)
@@ -753,132 +719,98 @@ impl<V: ListValue, const N: usize, const L: usize> ListsOf<V, N, L> {
         if container == NO_LIST {
             return Err(Error::NotActive);
         }
-        let list = container;
-        // `set_next`/`set_prev` locate the end marker by SUBTRACTING
-        // `END_BASE` from the link and indexing `ends` with the difference,
-        // through an `Option` and a `Result`. Here the list is already in
-        // hand: an item's neighbour is another item or THIS list's marker,
-        // never another list's, so `end_mut(list)` reaches the same struct
-        // without the arithmetic and without the option.
-        //
-        // The writes stay exactly where they were. Moving them DOWN into the
-        // length bump is a different change and it loses -- +6.18% x86-64,
-        // +10.21% i686, measured twice, once on a moved baseline.
-        if Self::is_end(prev) {
-            self.end_mut(list)?.next = next;
-        } else {
-            self.item_mut(prev)?.next = next;
-        }
-        if Self::is_end(next) {
-            self.end_mut(list)?.prev = prev;
-        } else {
-            self.item_mut(next)?.prev = prev;
-        }
+        // Both unconditional, for the same reason as `link_between`.
+        self.at_mut(next).prev = prev;
+        self.at_mut(prev).next = next;
         {
-            let n = self.item_mut(item)?;
-            n.container = NO_LIST;
-            n.prev = NONE;
-            n.next = NONE;
+            // `item` was validated above, so this needs no second check.
+            //
+            // ONLY `container`, which is what `uxListRemove` clears too. The
+            // two `NONE` writes that used to be here were hygiene, not
+            // safety: nothing can follow a removed node's links, because
+            // every path to them goes through a `container != NO_LIST` test
+            // first. They cost 2 stores per removal and the C makes neither.
+            self.at_mut(item).container = NO_LIST;
         }
-        // The length this answers is the one just decremented, so the
-        // trailing re-read of the end marker is gone.
-        let e = self.end_mut(list)?;
-        if e.cursor == item {
-            e.cursor = prev;
+        // `container` came out of a linked node, so it names a real list.
+        let m = self.list_meta_mut(container)?;
+        if m.cursor == item {
+            m.cursor = prev;
         }
-        // Wrapping: this is reached only after the item was found in
-        // this list and unlinked from it, so the length is at least one.
-        e.len = e.len.wrapping_sub(1);
-        Ok(usize::from(e.len))
+        // Wrapping: this is reached only after the item was found in this
+        // list and unlinked from it, so the length is at least one.
+        m.len = m.len.wrapping_sub(1);
+        Ok(usize::from(m.len))
     }
 
     /// `listLIST_IS_EMPTY`.
     ///
     /// # Errors
-    /// [`Error::InvalidArgument`] for a list outside `0..L`.
+    ///
+    /// [`Error::InvalidArgument`] if `list` names no list.
     pub fn is_empty(&self, list: ListId) -> Result<bool> {
-        Ok(self.end(list)?.len == 0)
+        Ok(self.list_meta(list)?.len == 0)
     }
 
     /// `listCURRENT_LIST_LENGTH`.
     ///
     /// # Errors
-    /// [`Error::InvalidArgument`] for a list outside `0..L`.
+    ///
+    /// [`Error::InvalidArgument`] if `list` names no list.
     pub fn len(&self, list: ListId) -> Result<usize> {
-        Ok(usize::from(self.end(list)?.len))
+        Ok(usize::from(self.list_meta(list)?.len))
     }
 
-    /// `listGET_HEAD_ENTRY`: the first item, or `None` when empty.
+    /// The first item, or `None` when the list is empty.
     ///
     /// # Errors
-    /// [`Error::InvalidArgument`] for a list outside `0..L`.
+    ///
+    /// [`Error::InvalidArgument`] if `list` names no list.
     pub fn head(&self, list: ListId) -> Result<Option<ItemId>> {
-        let e = self.end(list)?;
-        Ok((e.len > 0 && !Self::is_end(e.next)).then_some(e.next))
+        let len = self.list_meta(list)?.len;
+        let first = self.at(Self::end_of(list)).next;
+        Ok((len > 0 && !Self::is_end(first)).then_some(first))
     }
 
-    /// `listGET_ITEM_VALUE_OF_HEAD_ENTRY`: the first item's value, or
-    /// [`Lists::MAX_VALUE`] (the end marker's) when empty — exactly the C
-    /// idiom the delayed-list wake-time check relies on.
+    /// The first item's value, or [`ListsOf::MAX_VALUE`] when empty.
     ///
     /// # Errors
-    /// [`Error::InvalidArgument`] for a list outside `0..L`.
+    ///
+    /// [`Error::InvalidArgument`] if `list` names no list.
     pub fn head_value(&self, list: ListId) -> Result<V> {
-        match self.head(list)? {
-            Some(item) => self.value(item),
-            None => Ok(Self::MAX_VALUE),
-        }
+        // No empty-list branch: when the list is empty the marker's own
+        // `next` is the marker, and a marker carries `MAX_VALUE`. The answer
+        // falls out of the data instead of being special-cased.
+        let _ = self.list_meta(list)?;
+        let first = self.at(Self::end_of(list)).next;
+        Ok(self.at(first).value)
     }
 
-    /// The LAST item's value, or [`ListsOf::MAX_VALUE`] when the list is
-    /// empty -- the mirror of [`ListsOf::head_value`].
-    ///
-    /// For a list that is kept sorted, this is the largest value in it, and
-    /// that is what it is for: a caller that knows its own list is sorted can
-    /// compare against this and, when its value is at least as large, use
-    /// [`ListsOf::insert_end`] to append in O(1) instead of walking.
-    ///
-    /// The list does NOT check that claim, deliberately. A `sorted` flag
-    /// maintained in here costs every insert and every remove on every list
-    /// -- measured, it turned a 12% stage win into a 5% system loss, because
-    /// a kernel's list traffic is overwhelmingly ready lists that never walk
-    /// anything. The caller that knows the invariant is the caller that
-    /// should spend the comparison.
+    /// The last item's value, or [`ListsOf::MAX_VALUE`] when empty.
     ///
     /// # Errors
-    /// [`Error::InvalidArgument`] for a list outside `0..L`.
+    ///
+    /// [`Error::InvalidArgument`] if `list` names no list.
     pub fn tail_value(&self, list: ListId) -> Result<V> {
-        let prev = self.end(list)?.prev;
-        if Self::is_end(prev) {
-            return Ok(Self::MAX_VALUE);
-        }
-        Ok(self.item(prev)?.value)
+        let _ = self.list_meta(list)?;
+        let last = self.at(Self::end_of(list)).prev;
+        Ok(self.at(last).value)
     }
 
-    /// Whether the list's values do not decrease from head to tail.
-    ///
-    /// `O(n)`, and the reason it is not run on every insert is in
-    /// [`ListsOf::tail_value`]. It exists so that the one promise
-    /// [`ListsOf::insert_sorted`] still asks a caller to make can be
-    /// CHECKED rather than only asserted in prose -- in a unit test, in a
-    /// Kani harness, or in a firmware self-check.
-    ///
-    /// It answers a `Result` rather than panicking on a corrupt list,
-    /// because this crate's contract is that nothing in it panics on any
-    /// input a caller can construct (`tests/no_panic.rs`). That rules out
-    /// the `debug_assert!` this would otherwise have been.
+    /// Whether the list is in ascending value order.
     ///
     /// # Errors
-    /// [`Error::InvalidArgument`] for a list outside `0..L`, or for a list
-    /// whose links do not terminate -- the same corruption guard
-    /// [`ListsOf::insert`] walks under.
+    ///
+    /// [`Error::InvalidArgument`] if `list` names no list, or if the walk
+    /// runs longer than the arena can hold.
     pub fn is_sorted(&self, list: ListId) -> Result<bool> {
-        let end = Self::end_of(list);
-        let (mut node, _) = self.next_and_value(end, list)?;
+        let _ = self.list_meta(list)?;
+        let mut node = self.at(Self::end_of(list)).next;
         let mut previous: Option<V> = None;
         let mut guard = 0usize;
-        while !Self::is_marker_of(node, list) {
-            let (following, value) = self.next_and_value(node, list)?;
+        while !Self::is_end(node) {
+            let n = self.at(node);
+            let (following, value) = (n.next, n.value);
             if previous.is_some_and(|p| value < p) {
                 return Ok(false);
             }
@@ -892,122 +824,72 @@ impl<V: ListValue, const N: usize, const L: usize> ListsOf<V, N, L> {
         Ok(true)
     }
 
-    /// `vListInsert`, taking the `O(1)` append when the value belongs at the
-    /// end instead of walking there.
-    ///
-    /// # What this takes off the caller
-    ///
-    /// The kernel used to spell this out at the call site: read
-    /// [`ListsOf::tail_value`], compare, and on the fast side write the
-    /// value and call [`ListsOf::insert_end`]. That is three separate
-    /// things to get right, and two of them are silent when wrong:
-    ///
-    /// * the comparison must be `>=`, not `>`. `vListInsert` puts a later
-    ///   equal value AFTER the ones already there, which is where appending
-    ///   puts it; `>` sends equals down the walk and reorders wakes that
-    ///   share a tick. **Now in here.**
-    /// * the append must actually append. [`ListsOf::insert_end`] links
-    ///   before the CURSOR, so it appends only while the cursor is still at
-    ///   the marker -- a delayed list's never moves, but nothing in the name
-    ///   says so, and a ready list's moves on every lap. This links between
-    ///   the tail and the marker instead, which appends whatever the cursor
-    ///   is doing. **Gone, not delegated and not checked**: there is no
-    ///   longer a question to get wrong.
-    /// * the list must already be sorted. **Still the caller's**, and
-    ///   [`ListsOf::is_sorted`] is how to check it.
-    ///
-    /// Three promises became one, and the one that is left is the only one
-    /// the list cannot answer for itself without the `sorted` flag that
-    /// [`ListsOf::tail_value`] records as a measured net loss.
-    ///
-    /// It is also FASTER than the call site it replaces -- one end read
-    /// rather than two, and the value written by the link rather than by a
-    /// separate `set_value`, and no cursor is read at all. Measured, two
-    /// real trees, callgrind, work parity held by an identical checksum
-    /// down every column:
-    ///
-    /// | instrument | call site | `insert_sorted` | |
-    /// |---|---:|---:|---:|
-    /// | `kdelay-ir` | 4,024,119 | 3,995,313 | -0.72% |
-    /// | `kdelay-deep` | 4,368,168 | 4,344,745 | -0.54% |
-    /// | `khot-ir` | 14,800,504 | 14,736,516 | -0.43% |
-    /// | `ksched-ir` | 1,790,797 | 1,790,797 | flat |
-    ///
-    /// Worth recording WHY, because the first attempt at this got it
-    /// backwards: a version that kept `insert_end` and TESTED the cursor
-    /// cost +0.09% to +0.19% instead. Removing the question beat checking
-    /// it, on every arm.
+    /// `vListInsert`, taking the append shortcut when the value belongs at
+    /// the end — which, for a delayed list fed a rising tick, it usually
+    /// does.
     ///
     /// # Errors
+    ///
     /// As [`ListsOf::insert`].
     pub fn insert_sorted(&mut self, list: ListId, item: ItemId, value: V) -> Result<()> {
-        let tail = self.end(list)?.prev;
-        let tail_value = if Self::is_end(tail) {
-            Self::MAX_VALUE
-        } else {
-            self.item(tail)?.value
-        };
+        let _ = self.list_meta(list)?;
+        let end = Self::end_of(list);
+        let tail = self.at(end).prev;
+        // An empty list answers `MAX_VALUE` here without a branch, because
+        // `tail` is then the marker and a marker carries `MAX_VALUE`.
+        let tail_value = self.at(tail).value;
         // `>=`, not `>`: `vListInsert` puts a later equal value AFTER the
         // ones already there, which is exactly where appending puts it.
         if value >= tail_value {
             // A TRUE append: linked between the tail and the end marker.
             //
             // NOT `insert_end`, which links before the CURSOR and so appends
-            // only while the cursor is still sitting at the marker. Naming
-            // the marker directly makes that question disappear instead of
-            // answering it -- and it writes the value on the way in, where
-            // `insert_end` keeps the item's own and would need a
-            // `set_value` first.
-            return self.link_between(list, item, tail, Self::end_of(list), Some(value));
+            // only while the cursor is still sitting at the marker.
+            return self.link_between(list, item, tail, end, Some(value));
         }
         self.insert(list, item, value)
     }
 
-    /// Where the round-robin cursor (`pxIndex`) currently sits.
-    ///
-    /// A diagnostic. When a ready task is never chosen, the question is
-    /// always "did the cursor move", and nothing else can answer it.
+    /// `pxIndex`: where the round robin is sitting.
     ///
     /// # Errors
-    /// [`Error::InvalidArgument`] for a list that does not exist.
+    ///
+    /// [`Error::InvalidArgument`] if `list` names no list.
     pub fn cursor_of(&self, list: ListId) -> Result<ItemId> {
-        Ok(self.end(list)?.cursor)
+        Ok(self.list_meta(list)?.cursor)
     }
 
-    /// `listGET_OWNER_OF_NEXT_ENTRY`: advance the cursor past the end marker
-    /// and return the item it lands on, or `None` when the list is empty.
+    /// `listGET_OWNER_OF_NEXT_ENTRY`: advance the round robin and answer
+    /// whose turn it now is.
     ///
     /// # Errors
-    /// [`Error::InvalidArgument`] for a list outside `0..L`.
+    ///
+    /// [`Error::InvalidArgument`] if `list` names no list.
     pub fn next_round_robin(&mut self, list: ListId) -> Result<Option<ItemId>> {
-        let end = Self::end_of(list);
-        // The node after the end marker is the list's first item, which is
-        // the `ends[list].next` this read already took — so wrapping costs
-        // no second read, which is what it used to cost on every lap.
-        let (cursor, len, first) = {
-            let e = self.end(list)?;
-            (e.cursor, e.len, e.next)
+        let (cursor, len) = {
+            let m = self.list_meta(list)?;
+            (m.cursor, m.len)
         };
         if len == 0 {
             return Ok(None);
         }
-        let mut next = if cursor == end {
-            first
-        } else {
-            self.item(cursor)?.next
-        };
+        let end = Self::end_of(list);
+        // No "is the cursor the marker" branch: the marker's `next` IS the
+        // first item, so one read serves both cases.
+        let mut next = self.at(cursor).next;
         if next == end {
-            next = first;
+            next = self.at(next).next;
         }
-        self.end_mut(list)?.cursor = next;
+        self.list_meta_mut(list)?.cursor = next;
         Ok((!Self::is_end(next)).then_some(next))
     }
 
-    /// The item after `item` in its list, or `None` at the end.
+    /// The item after this one, or `None` at the end of the list.
     ///
     /// # Errors
-    /// [`Error::InvalidArgument`] for a bad item; [`Error::NotActive`] if
-    /// the item is in no list.
+    ///
+    /// [`Error::InvalidArgument`] if `item` names no item,
+    /// [`Error::NotActive`] if it is in no list.
     pub fn next(&self, item: ItemId) -> Result<Option<ItemId>> {
         let n = self.item(item)?;
         if n.container == NO_LIST {
@@ -1016,13 +898,10 @@ impl<V: ListValue, const N: usize, const L: usize> ListsOf<V, N, L> {
         Ok((!Self::is_end(n.next)).then_some(n.next))
     }
 
-    /// The items of `list` from the head, in list order.
+    /// Every item in the list, in order.
     pub fn iter(&self, list: ListId) -> Iter<'_, V, N, L> {
-        // ONE end-marker read. `head()` and `len()` are both `end()`, so
-        // building the iterator used to look the same list up twice for two
-        // fields of the same struct.
-        let (at, remaining) = match self.end(list) {
-            Ok(e) => (e.next, usize::from(e.len)),
+        let (at, remaining) = match self.list_meta(list) {
+            Ok(m) => (self.at(Self::end_of(list)).next, usize::from(m.len)),
             Err(_) => (NONE, 0),
         };
         Iter {
@@ -1033,20 +912,10 @@ impl<V: ListValue, const N: usize, const L: usize> ListsOf<V, N, L> {
     }
 }
 
-/// The items of one list, head first.
-///
-/// `at` is a RAW LINK, not an `Option<ItemId>`, because the list already
-/// carries its own terminator: the end marker. Walking `Option<ItemId>` meant
-/// every step went through [`ListsOf::next`], which re-checks that the item is
-/// in a list -- a question this walk answered when it started -- and then
-/// wraps the answer in a `Result<Option<_>>` for `.ok().flatten()` to
-/// immediately unwrap again. The marker does that job with one comparison.
+/// The iterator [`ListsOf::iter`] returns.
 pub struct Iter<'a, V: ListValue, const N: usize, const L: usize> {
     lists: &'a ListsOf<V, N, L>,
-    /// The next link to visit; an end marker (or [`NONE`]) stops the walk.
     at: u16,
-    /// The anti-cycle guard, NOT the terminator. A list that pointed at
-    /// itself would otherwise never reach a marker.
     remaining: usize,
 }
 
@@ -1054,18 +923,13 @@ impl<V: ListValue, const N: usize, const L: usize> Iterator for Iter<'_, V, N, L
     type Item = ItemId;
 
     fn next(&mut self) -> Option<ItemId> {
-        if self.remaining == 0 || self.at >= END_BASE {
+        if self.remaining == 0 || ListsOf::<V, N, L>::is_end(self.at) {
             return None;
         }
         let item = self.at;
         // Wrapping: the guard above returned on zero.
         self.remaining = self.remaining.wrapping_sub(1);
-        // A link this module wrote out of range is a corrupt list; stop the
-        // walk rather than pretend the rest of it is meaningful.
-        self.at = match self.lists.item(item) {
-            Ok(n) => n.next,
-            Err(_) => NONE,
-        };
+        self.at = self.lists.at(item).next;
         Some(item)
     }
 }
@@ -1078,7 +942,7 @@ mod tests {
 
     use super::*;
 
-    fn order(l: &Lists<8, 2>, list: ListId) -> Vec<ItemId> {
+    fn order(l: &Lists<16, 2>, list: ListId) -> Vec<ItemId> {
         l.iter(list).collect()
     }
 
@@ -1091,7 +955,7 @@ mod tests {
     /// one of the two tasks never runs again.
     #[test]
     fn round_robin_alternates_between_two_items() {
-        let mut l = Lists::<8, 2>::new();
+        let mut l = Lists::<16, 2>::new();
         l.insert_end(0, 1).unwrap();
         l.insert_end(0, 2).unwrap();
         assert_eq!(l.len(0).unwrap(), 2);
@@ -1120,7 +984,7 @@ mod tests {
     /// exactly where it was left.
     #[test]
     fn round_robin_survives_another_list_being_used_between_calls() {
-        let mut l = Lists::<8, 2>::new();
+        let mut l = Lists::<16, 2>::new();
         // list 0: the busy priority, two tasks that never leave.
         l.insert_end(0, 1).unwrap();
         l.insert_end(0, 2).unwrap();
@@ -1148,7 +1012,7 @@ mod tests {
     /// Three items rotate in order and come back round.
     #[test]
     fn round_robin_visits_every_item_in_turn() {
-        let mut l = Lists::<8, 2>::new();
+        let mut l = Lists::<16, 2>::new();
         for item in 1..=3 {
             l.insert_end(0, item).unwrap();
         }
@@ -1173,15 +1037,15 @@ mod tests {
 
     #[test]
     fn insert_sorts_ascending_after_equal_values_like_v_list_insert() {
-        let mut l = Lists::<8, 2>::new();
+        let mut l = Lists::<16, 2>::new();
         assert!(l.is_empty(0).unwrap());
-        assert_eq!(l.head_value(0).unwrap(), Lists::<8, 2>::MAX_VALUE);
+        assert_eq!(l.head_value(0).unwrap(), Lists::<16, 2>::MAX_VALUE);
         l.insert(0, 3, 30).unwrap();
         l.insert(0, 1, 10).unwrap();
         l.insert(0, 2, 20).unwrap();
         l.insert(0, 4, 20).unwrap(); // equal value: after item 2
-        l.insert(0, 5, Lists::<8, 2>::MAX_VALUE).unwrap();
-        l.insert(0, 6, Lists::<8, 2>::MAX_VALUE).unwrap(); // MAX after MAX
+        l.insert(0, 5, Lists::<16, 2>::MAX_VALUE).unwrap();
+        l.insert(0, 6, Lists::<16, 2>::MAX_VALUE).unwrap(); // MAX after MAX
         assert_eq!(order(&l, 0), [1, 2, 4, 3, 5, 6]);
         assert_eq!(l.head(0).unwrap(), Some(1));
         assert_eq!(l.head_value(0).unwrap(), 10);
@@ -1192,7 +1056,7 @@ mod tests {
 
     #[test]
     fn insert_end_and_the_round_robin_cursor() {
-        let mut l = Lists::<8, 2>::new();
+        let mut l = Lists::<16, 2>::new();
         assert_eq!(l.next_round_robin(0).unwrap(), None);
         l.insert_end(0, 1).unwrap();
         l.insert_end(0, 2).unwrap();
@@ -1212,7 +1076,7 @@ mod tests {
 
     #[test]
     fn remove_returns_the_count_and_moves_the_cursor_back() {
-        let mut l = Lists::<8, 2>::new();
+        let mut l = Lists::<16, 2>::new();
         for i in 1..=3 {
             l.insert_end(0, i).unwrap();
         }
@@ -1232,7 +1096,7 @@ mod tests {
 
     #[test]
     fn an_item_is_in_one_list_at_a_time_and_moves_between_lists() {
-        let mut l = Lists::<8, 2>::new();
+        let mut l = Lists::<16, 2>::new();
         l.insert(0, 1, 5).unwrap();
         assert_eq!(l.insert(1, 1, 5), Err(Error::Busy));
         assert_eq!(l.insert_end(1, 1), Err(Error::Busy));
@@ -1246,13 +1110,74 @@ mod tests {
 
     #[test]
     fn bad_arguments_are_errors_not_panics() {
-        let mut l = Lists::<4, 1>::new();
+        type L8 = Lists<8, 1>;
+        // The first id PAST the items, written from the constant rather
+        // than as a literal. A literal is exactly what went stale when N
+        // changed from the item count to the slot count: the 4 that had
+        // been out of range silently became a valid item.
+        const PAST_END: ItemId = L8::CAPACITY as ItemId;
+        let mut l = L8::new();
         assert_eq!(l.insert(1, 0, 0), Err(Error::InvalidArgument));
-        assert_eq!(l.insert(0, 4, 0), Err(Error::InvalidArgument));
-        assert_eq!(l.remove(9), Err(Error::InvalidArgument));
+        assert_eq!(l.insert(0, PAST_END, 0), Err(Error::InvalidArgument));
+        assert_eq!(l.remove(PAST_END + 2), Err(Error::InvalidArgument));
         assert_eq!(l.head(3), Err(Error::InvalidArgument));
         assert_eq!(l.next(0), Err(Error::NotActive));
-        assert_eq!(l.set_value(7, 1), Err(Error::InvalidArgument));
+        assert_eq!(l.set_value(PAST_END, 1), Err(Error::InvalidArgument));
+    }
+
+    /// The end marker's `MAX_VALUE` is what makes the ordered walk finite,
+    /// so it is pinned rather than argued.
+    ///
+    /// `insert_inner` used to carry a step counter that returned
+    /// `InvalidArgument` if the walk ran longer than the arena. It was dead
+    /// code — the walk cannot outrun a marker carrying the largest value
+    /// there is — and it cost **3.27 instructions per list operation**,
+    /// measured, which was the difference between 23.07 and 19.80. It is
+    /// gone, and these three properties are why that is safe:
+    ///
+    /// 1. a marker's value cannot be written, because every path to a
+    ///    `value` write goes through `item_mut`, which refuses any id at or
+    ///    above `CAPACITY`;
+    /// 2. the walk only runs for values strictly below `MAX_VALUE`, because
+    ///    `MAX_VALUE` itself takes the append branch above it;
+    /// 3. so `after_value > value` is true at the marker at the latest, and
+    ///    the loop breaks within `len + 1` steps.
+    ///
+    /// Break any of the three and this test fails. That is the whole point
+    /// of it: the guard was removed on the strength of an invariant, so the
+    /// invariant is now the thing under test.
+    #[test]
+    fn the_marker_is_what_terminates_the_ordered_walk() {
+        type L = Lists<16, 2>;
+        const MARKER: ItemId = L::CAPACITY as ItemId;
+
+        // (1) No caller can reach a marker's value.
+        let mut l = L::new();
+        assert_eq!(l.set_value(MARKER, 0), Err(Error::InvalidArgument));
+        assert_eq!(l.set_value(MARKER + 1, 0), Err(Error::InvalidArgument));
+        assert_eq!(l.value(MARKER), Err(Error::InvalidArgument));
+        // Nor unlink one, which would leave a list with no terminator.
+        assert_eq!(l.remove(MARKER), Err(Error::InvalidArgument));
+
+        // (2) MAX_VALUE never enters the walk; it appends.
+        l.insert(0, 0, 5).unwrap();
+        l.insert(0, 1, L::MAX_VALUE).unwrap();
+        l.insert(0, 2, 7).unwrap();
+        assert_eq!(order(&l, 0), [0, 2, 1], "MAX_VALUE must sort to the end");
+
+        // (3) A FULL list still terminates, walked from both ends. If the
+        // marker ever stopped breaking the loop this would hang rather than
+        // fail, so it is the case worth having.
+        let mut full = L::new();
+        for item in 0..MARKER {
+            // Descending, so every insert walks the whole list to the front
+            // — the longest walk the structure can produce.
+            full.insert(0, item, u64::from(MARKER - item)).unwrap();
+        }
+        assert_eq!(full.len(0).unwrap(), usize::from(MARKER));
+        assert!(full.is_sorted(0).unwrap());
+        assert_eq!(full.head_value(0).unwrap(), 1);
+        assert_eq!(full.tail_value(0).unwrap(), u64::from(MARKER));
     }
 
     /// A value EQUAL to the tail's goes after it.
@@ -1264,15 +1189,15 @@ mod tests {
     /// test in this file would notice.
     #[test]
     fn a_value_equal_to_the_tail_goes_after_it() {
-        let mut l = Lists::<8, 2>::new();
+        let mut l = Lists::<16, 2>::new();
         l.insert(0, 1, 10).unwrap();
         l.insert(0, 2, 20).unwrap();
         l.insert(0, 3, 20).unwrap(); // equal to the tail: after it
         l.insert(0, 4, 21).unwrap(); // above the tail: last
         l.insert(0, 5, 5).unwrap(); // below the head: first
         assert_eq!(order(&l, 0), [5, 1, 2, 3, 4]);
-        l.insert(0, 6, Lists::<8, 2>::MAX_VALUE).unwrap();
-        l.insert(0, 7, Lists::<8, 2>::MAX_VALUE).unwrap();
+        l.insert(0, 6, Lists::<16, 2>::MAX_VALUE).unwrap();
+        l.insert(0, 7, Lists::<16, 2>::MAX_VALUE).unwrap();
         assert_eq!(order(&l, 0), [5, 1, 2, 3, 4, 6, 7]);
     }
 
@@ -1283,11 +1208,11 @@ mod tests {
     /// about which one runs.
     #[test]
     fn the_first_item_of_an_empty_list_at_both_extremes() {
-        let mut l = Lists::<8, 2>::new();
-        l.insert(0, 0, Lists::<8, 2>::MAX_VALUE).unwrap();
+        let mut l = Lists::<16, 2>::new();
+        l.insert(0, 0, Lists::<16, 2>::MAX_VALUE).unwrap();
         assert_eq!(order(&l, 0), [0]);
         assert_eq!(l.head(0).unwrap(), Some(0));
-        assert_eq!(l.head_value(0).unwrap(), Lists::<8, 2>::MAX_VALUE);
+        assert_eq!(l.head_value(0).unwrap(), Lists::<16, 2>::MAX_VALUE);
         assert_eq!(l.len(0).unwrap(), 1);
 
         l.insert(1, 1, 7).unwrap();
@@ -1316,7 +1241,7 @@ mod tests {
     /// end in another.
     #[test]
     fn insert_end_leaves_a_list_unsorted_and_insert_still_walks_it() {
-        let mut l = Lists::<8, 2>::new();
+        let mut l = Lists::<16, 2>::new();
         l.insert(0, 1, 10).unwrap();
         l.insert(0, 2, 20).unwrap();
         l.insert(0, 3, 30).unwrap();
@@ -1341,7 +1266,7 @@ mod tests {
     /// when it does not, and the list is sorted either way.
     #[test]
     fn insert_sorted_appends_or_walks_and_stays_sorted() {
-        let mut l = Lists::<8, 2>::new();
+        let mut l = Lists::<16, 2>::new();
         l.insert_sorted(0, 1, 10).unwrap();
         l.insert_sorted(0, 2, 20).unwrap();
         // Belongs at the end: the append path.
@@ -1365,7 +1290,7 @@ mod tests {
     /// for tasks that share a tick, and nothing else to see.
     #[test]
     fn insert_sorted_puts_a_later_equal_value_after_its_equals() {
-        let mut l = Lists::<8, 2>::new();
+        let mut l = Lists::<16, 2>::new();
         l.insert_sorted(0, 1, 10).unwrap();
         l.insert_sorted(0, 2, 20).unwrap();
         l.insert_sorted(0, 3, 20).unwrap();
@@ -1374,7 +1299,7 @@ mod tests {
 
         // The same three through the plain walk, which is the behaviour the
         // append has to agree with.
-        let mut w = Lists::<8, 2>::new();
+        let mut w = Lists::<16, 2>::new();
         w.insert(0, 1, 10).unwrap();
         w.insert(0, 2, 20).unwrap();
         w.insert(0, 3, 20).unwrap();
@@ -1396,7 +1321,7 @@ mod tests {
     /// the test that fails.
     #[test]
     fn insert_sorted_appends_at_the_tail_even_after_the_cursor_has_moved() {
-        let mut l = Lists::<8, 2>::new();
+        let mut l = Lists::<16, 2>::new();
         l.insert_sorted(0, 1, 10).unwrap();
         l.insert_sorted(0, 2, 20).unwrap();
         l.insert_sorted(0, 3, 30).unwrap();
@@ -1424,7 +1349,7 @@ mod tests {
     /// without the `sorted` flag that `tail_value` records as a net loss.
     #[test]
     fn insert_sorted_on_an_unsorted_list_misplaces_and_is_sorted_says_so() {
-        let mut l = Lists::<8, 2>::new();
+        let mut l = Lists::<16, 2>::new();
         l.insert(0, 1, 10).unwrap();
         l.insert(0, 2, 20).unwrap();
         l.insert(0, 3, 30).unwrap();
@@ -1445,7 +1370,7 @@ mod tests {
     /// `is_sorted` on the lists the kernel actually keeps sorted.
     #[test]
     fn is_sorted_answers_for_empty_single_and_equal_lists() {
-        let mut l = Lists::<8, 2>::new();
+        let mut l = Lists::<16, 2>::new();
         assert!(l.is_sorted(0).unwrap(), "an empty list is sorted");
         l.insert_sorted(0, 1, 7).unwrap();
         assert!(l.is_sorted(0).unwrap(), "one item is sorted");
@@ -1462,7 +1387,7 @@ mod tests {
     /// across this call.
     #[test]
     fn set_value_on_a_linked_item_leaves_the_list_unsorted() {
-        let mut l = Lists::<8, 2>::new();
+        let mut l = Lists::<16, 2>::new();
         l.insert(0, 1, 10).unwrap();
         l.insert(0, 2, 20).unwrap();
         l.insert(0, 3, 30).unwrap();
@@ -1475,7 +1400,7 @@ mod tests {
 
     #[test]
     fn set_value_then_reinsert_resorts() {
-        let mut l = Lists::<4, 1>::new();
+        let mut l = Lists::<8, 1>::new();
         l.insert(0, 0, 1).unwrap();
         l.insert(0, 1, 2).unwrap();
         l.remove(0).unwrap();
@@ -1494,7 +1419,7 @@ mod tests {
     #[test]
     fn is_sorted_does_not_false_alarm_on_a_completely_full_list() {
         // Eight items is N for this geometry: the walk touches every one.
-        let mut l = Lists::<8, 2>::new();
+        let mut l = Lists::<16, 2>::new();
         for i in 0..8_u16 {
             l.insert_sorted(0, i, u64::from(i) * 10).unwrap();
         }
@@ -1511,14 +1436,14 @@ mod tests {
     /// nothing, and it is NOT the type's default.
     #[test]
     fn tail_value_is_max_when_empty_and_the_last_value_when_not() {
-        let mut l = Lists::<8, 2>::new();
+        let mut l = Lists::<16, 2>::new();
         assert_eq!(
             l.tail_value(0),
-            Ok(Lists::<8, 2>::MAX_VALUE),
+            Ok(Lists::<16, 2>::MAX_VALUE),
             "empty answers MAX, which is the end marker's own value"
         );
         assert_ne!(
-            Lists::<8, 2>::MAX_VALUE,
+            Lists::<16, 2>::MAX_VALUE,
             u64::default(),
             "and MAX is not the default, or the test above proves nothing"
         );
@@ -1531,7 +1456,7 @@ mod tests {
     /// `is_empty` tracks the list it is asked about and not some other one.
     #[test]
     fn is_empty_follows_inserts_and_removes_on_that_list_alone() {
-        let mut l = Lists::<8, 2>::new();
+        let mut l = Lists::<16, 2>::new();
         assert_eq!(l.is_empty(0), Ok(true));
         assert_eq!(l.is_empty(1), Ok(true));
 
@@ -1548,7 +1473,7 @@ mod tests {
     /// it landed on afterwards.
     #[test]
     fn cursor_of_reports_the_marker_then_the_item_it_lands_on() {
-        let mut l = Lists::<8, 2>::new();
+        let mut l = Lists::<16, 2>::new();
         l.insert_sorted(0, 1, 10).unwrap();
         l.insert_sorted(0, 2, 20).unwrap();
 
@@ -1588,7 +1513,7 @@ mod tests {
     /// guard never moved at all.
     #[test]
     fn insert_takes_its_longest_walk_on_a_full_list_entered_in_order() {
-        let mut l = Lists::<8, 2>::new();
+        let mut l = Lists::<16, 2>::new();
         // ASCENDING: each new value belongs after everything already
         // linked, so `insert` walks the whole list before placing it.
         for i in 0..8_u16 {
@@ -1605,7 +1530,7 @@ mod tests {
     /// went unnoticed.
     #[test]
     fn insert_keeping_value_links_the_item_and_sorts_by_what_it_holds() {
-        let mut l = Lists::<8, 2>::new();
+        let mut l = Lists::<16, 2>::new();
         l.insert(0, 1, 10).unwrap();
         l.insert(0, 2, 30).unwrap();
 
@@ -1628,7 +1553,7 @@ mod tests {
     /// and then run off the end.
     #[test]
     fn next_yields_the_successor_and_stops_at_the_tail() {
-        let mut l = Lists::<8, 2>::new();
+        let mut l = Lists::<16, 2>::new();
         l.insert(0, 1, 10).unwrap();
         l.insert(0, 2, 20).unwrap();
         l.insert(0, 3, 30).unwrap();

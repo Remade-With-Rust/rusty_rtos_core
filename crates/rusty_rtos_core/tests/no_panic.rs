@@ -115,7 +115,7 @@ fn constructors_and_conversions_never_panic() {
     ignore = "200 x 500 random operations; hours under Miri, milliseconds natively (the unit tests carry the Miri gate)"
 )]
 fn random_list_and_arena_operation_sequences_never_panic() {
-    const ITEMS: usize = 12;
+    const ITEMS: usize = 16; // SLOTS: 12 items + 3 lists, rounded up
     const LISTS: usize = 3;
     let mut rng = Lcg(0x5eed_0002);
     for round in 0..200 {
