@@ -217,6 +217,106 @@ round!(
 /// The null arm: the same loop with the allocation removed, so what is
 /// reported is the allocator's own work and not the harness's.
 #[inline(never)]
+/// A FIXED-SIZE POOL, for the sizes an RTOS actually knows at compile time.
+///
+/// This is not a faster allocator — it is a narrower question. A pool serves
+/// one block size from a pre-sized arena, so there is no size class to
+/// compute, no bin, no page lookup: `alloc` is a pop and `free` is a push.
+/// TCBs, queue items and timer records are all exactly that shape.
+///
+/// Counted on the host at **12.00 instructions per alloc/free pair against
+/// 53.57 for the general path at 256 bytes** — and flat in size, which the
+/// general path is not. This measures what that is worth in CYCLES on the
+/// part, against the same `heap_4` every other row is measured against.
+///
+/// The bounds checks stay in. This is what a SAFE pool costs.
+fn pool_round(size: usize) -> (u32, u32, bool) {
+    const BLOCKS: usize = 8;
+    const MAX_BLOCK: usize = 512;
+    let mut arena = [0u8; MAX_BLOCK * BLOCKS];
+    let mut free = [0usize; BLOCKS];
+    let stride = size.min(MAX_BLOCK).max(1);
+    for (i, slot) in free.iter_mut().enumerate() {
+        *slot = i * stride;
+    }
+    let mut top = BLOCKS;
+    let mut sum = 0u32;
+    let mut bad = false;
+
+    let start = ccount();
+    for i in 0..OPS {
+        // pop
+        if top == 0 {
+            bad = true;
+            break;
+        }
+        top -= 1;
+        let at = free[top];
+        if let Some(slot) = arena.get_mut(at) {
+            *slot = (i & 0xff) as u8;
+            sum = sum.wrapping_add(u32::from(*slot));
+        }
+        core::hint::black_box(at);
+        // push
+        free[top] = at;
+        top += 1;
+        sum = sum.wrapping_add((i as u32) & 1);
+    }
+    (ccount().wrapping_sub(start), sum, bad)
+}
+
+/// Which HALF of an alloc/free pair the cycles are in.
+///
+/// The paired loop cannot say. Seven operations costing ~88 cycles is ~12
+/// cycles each, which is far more than a load or a store retires in — so the
+/// question is whether the cost is INSTRUCTIONS or dependent-load LATENCY,
+/// and the first thing to know is where it sits.
+///
+/// Both halves are timed over blocks held live, so neither can be folded into
+/// the other: `alloc` fills the array with nothing freed, `free` drains an
+/// array already full. `best of ROUNDS`, like everything else here.
+fn split_alloc_free(size: usize) -> (u32, u32) {
+    let mut best_a = u32::MAX;
+    let mut best_f = u32::MAX;
+    let mut held = [core::ptr::null_mut::<u8>(); MAX_HELD];
+    // Fewer than OPS: 256 live blocks of 512 bytes would not fit the region.
+    let n = MAX_HELD.min((32 * 1024) / size.max(1)).min(OPS);
+
+    for _ in 0..(WARMUP + ROUNDS) {
+        let start = ccount();
+        for slot in held.iter_mut().take(n) {
+            // SAFETY: as the paired loop — size/align are a valid layout.
+            *slot = unsafe {
+                alloc::alloc::alloc(Layout::from_size_align_unchecked(size, ALIGN))
+            };
+        }
+        let a = ccount().wrapping_sub(start);
+
+        let start = ccount();
+        for slot in held.iter_mut().take(n) {
+            if !slot.is_null() {
+                // SAFETY: each came from the loop above and is freed once.
+                unsafe {
+                    alloc::alloc::dealloc(*slot, Layout::from_size_align_unchecked(size, ALIGN));
+                }
+            }
+        }
+        let f = ccount().wrapping_sub(start);
+
+        for slot in held.iter_mut().take(n) {
+            *slot = core::ptr::null_mut();
+        }
+        if a < best_a {
+            best_a = a;
+        }
+        if f < best_f {
+            best_f = f;
+        }
+    }
+    let n32 = u32::try_from(n).unwrap_or(1).max(1);
+    (best_a / n32, best_f / n32)
+}
+
 fn round_empty() -> (u32, u32, bool) {
     let mut sum = 0u32;
     let start = ccount();
@@ -292,7 +392,12 @@ fn main() -> ! {
     println!("method    best of {ROUNDS} interleaved rounds of {OPS} ops, {WARMUP} warm-up,");
     println!("          an empty round measured the same way and subtracted");
     println!("C arm     oracle FreeRTOS-Kernel heap_4.c, compiled verbatim, -O2");
-    println!("Rust arm  rusty_alloc small-metal, opt-level=s + LTO");
+    // Derived from the build, not asserted -- see `build.rs`.
+    println!(
+        "Rust arm  rusty_alloc small-metal, opt-level={} + LTO, overflow-checks={}",
+        env!("AB_OPT_LEVEL"),
+        env!("AB_OVERFLOW_CHECKS")
+    );
     println!("both      {ALIGN}-byte alignment, called directly, no lock either side");
     println!();
 
@@ -337,7 +442,7 @@ fn main() -> ! {
     println!();
 
     println!("     size   rust c/op    heap_4 c/op        ratio   heap_4 charged B");
-    for size in [16usize, 32, 64, 128, 256, 512, 1024, 2048] {
+    for size in [16usize, 32, 64, 128, 256, 504, 512, 513, 520, 640, 1024, 2048] {
         let (cr, cc, sr, sc, bad) = best_pair(|| round_rust(size, 0, 16), || round_c(size, 0, 16));
         if bad {
             failed += 1;
@@ -366,6 +471,41 @@ fn main() -> ! {
     }
 
     // The sweep that stops the flat 232 being read as heap_4's cost.
+    println!();
+    println!("--- a FIXED-SIZE POOL, the strategy an RTOS can use for known sizes ---");
+    println!("  not a faster allocator: a narrower question, answered in fewer");
+    println!("  instructions (12.00 Ir/pair on the host against 53.57 general).");
+    println!("     size    pool c/op   general c/op    heap_4 c/op   pool vs general");
+    for size in [256usize, 512] {
+        let mut best = u32::MAX;
+        for _ in 0..(WARMUP + ROUNDS) {
+            let (c, _, bad) = pool_round(size);
+            if !bad && c < best {
+                best = c;
+            }
+        }
+        let per = best.saturating_sub(floor) / OPS as u32;
+        let general = if size == 256 { 101 } else { 114 };
+        println!(
+            "  {size:7}  {per:11}  {general:13}  {:13}  {:14}",
+            235,
+            if per > 0 {
+                100 - (per * 100 / general)
+            } else {
+                0
+            }
+        );
+    }
+
+    println!();
+    println!("--- where the cycles are: alloc half vs free half ---");
+    println!("  blocks are HELD live, so neither half can hide in the other.");
+    println!("     size    alloc c/op     free c/op         pair");
+    for size in [16usize, 256, 512, 1024] {
+        let (a, f) = split_alloc_free(size);
+        println!("  {size:7}  {a:12}  {f:12}  {:11}", a + f);
+    }
+
     println!();
     println!("--- 512-byte requests against a free list of 16-byte HOLES ---");
     println!("  the clean case above is heap_4's best: one live block means a");

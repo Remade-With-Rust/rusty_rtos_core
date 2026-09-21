@@ -44,4 +44,26 @@ fn main() {
         .flag("-fdata-sections")
         .warnings(false)
         .compile("heap_4");
+
+    // The method line must be DERIVED, not asserted. It used to read
+    // `opt-level=s` from a string literal, so building this cell at any
+    // other optimisation level produced a report that said otherwise --
+    // a benchmark lying about how it was built, which is the one thing a
+    // printed method line exists to prevent. Cargo hands both of these to
+    // the build script; pass them through and let the cell read them back.
+    println!(
+        "cargo:rustc-env=AB_OPT_LEVEL={}",
+        std::env::var("OPT_LEVEL").unwrap_or_else(|_| "?".into())
+    );
+    // Cargo does not hand `overflow-checks` to a build script, and
+    // `cfg!(overflow_checks)` is still unstable — so read the manifest,
+    // which is the setting's own source of truth. Anything derived beats
+    // anything asserted here.
+    let manifest = std::fs::read_to_string(here.join("Cargo.toml")).unwrap_or_default();
+    let overflow = manifest
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("overflow-checks").map(|v| v.trim_start_matches([' ', '=']).trim().to_owned()))
+        .unwrap_or_else(|| "?".into());
+    println!("cargo:rustc-env=AB_OVERFLOW_CHECKS={overflow}");
+    println!("cargo:rerun-if-changed=Cargo.toml");
 }
