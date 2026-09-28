@@ -50,6 +50,16 @@ pub trait Config {
     /// `configUSE_TIMERS`: whether the software timer daemon exists.
     const USE_TIMERS: bool = true;
 
+    /// `configUSE_QUEUE_SETS`.
+    ///
+    /// Defaults to TRUE so nothing silently loses a feature it was using. The
+    /// C's own default is 0, and `bench/kernel-ram/c/FreeRTOSConfig.h` sets it
+    /// to 0 explicitly -- so a configuration that leaves this on is paying for
+    /// machinery the C kernel it is being compared against does not compile at
+    /// all. Turning it off compiles out `prvNotifyQueueSetContainer`'s twin
+    /// and the `set_container` test on every send.
+    const USE_QUEUE_SETS: bool = true;
+
     /// `sizeof( configMESSAGE_BUFFER_LENGTH_TYPE )`: how many bytes a
     /// message buffer spends on each message's length prefix.
     ///

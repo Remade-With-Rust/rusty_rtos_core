@@ -281,10 +281,27 @@
 use crate::error::{Error, Result};
 
 /// One of the `L` lists, `0..L`.
+/// A list id.
+///
+/// REFUTED at `u16` on 2026-09-24. Every list id is COMPUTED, so a `u8` ends
+/// each producer in `andi rd, rs, 0xff` (printed `zext.b`), and widening the
+/// type removes **20 `andi`** and 4 `mv` at no RAM cost -- `Node` pads to 16
+/// bytes either way. But LLVM then holds the `u16` shifted left 16 and scales
+/// it by 4 with `srli 0xe`: **`srli` +18**, flash **+40 B**, instructions +29.
+/// A displacement out of `andi` into `srli`, so `u8` stays.
 pub type ListId = u8;
 
 /// One of the `N` items, `0..N`.
 pub type ItemId = u16;
+
+// NO `NO_ITEM` sentinel here, deliberately.
+//
+// `next_round_robin` answering `ItemId` instead of `Option<ItemId>` removes a
+// discriminant from the scheduler's selection path and is worth ONE
+// instruction there -- and it cost `bench/list-cost` **1.52 instructions per
+// list operation**, 23.75 -> 25.27 on the 32-bit arm, across the forty
+// operations a round. The published row is the bigger number by far. Measured
+// both ways on 2026-09-24; do not re-derive it.
 
 /// What a list sorts by: a tick, at the width the configuration uses.
 ///
@@ -433,6 +450,7 @@ impl<V: ListValue, const N: usize, const L: usize> ListsOf<V, N, L> {
     /// `N - 1`. See [`slots_for`] for why this exists.
     const MASK: usize = N.wrapping_sub(1);
 
+
     const SIZES_FIT: () = assert!(
         N.is_power_of_two() && L > 0 && L < N && N <= 0x8000 && L <= u8::MAX as usize,
         "N must be a power of two, greater than L, at most 32768; use `slots_for`"
@@ -531,6 +549,13 @@ impl<V: ListValue, const N: usize, const L: usize> ListsOf<V, N, L> {
     }
 
     /// A caller's list handle, checked once.
+    /// NOT masked, unlike [`ListsOf::at`], and the difference is the source of
+    /// the index. A node link comes out of this structure's own array, so
+    /// `at`'s `& (N - 1)` can only ever be a no-op. A LIST ID comes from the
+    /// CALLER, and `tests/no_panic.rs` feeds ids in `0..LISTS + 2` on purpose to
+    /// prove the out-of-range ones are rejected. Masking would alias them onto a
+    /// real list instead — silent corruption in place of an error — which is why
+    /// the `li` + `bltu` at seventeen sites stays, measured at 100 bytes.
     fn list_meta(&self, list: ListId) -> Result<&Meta> {
         self.meta
             .get(usize::from(list))
@@ -660,6 +685,9 @@ impl<V: ListValue, const N: usize, const L: usize> ListsOf<V, N, L> {
     /// # Errors
     ///
     /// As [`ListsOf::insert`].
+    // A3: ONE caller, so the out-of-line body pays a prologue and epilogue for
+    // a single call. Inlining moves the body rather than duplicating it.
+    #[inline]
     pub fn insert_end(&mut self, list: ListId, item: ItemId) -> Result<()> {
         // ONE read of the cursor, and the node before it comes straight from
         // the cursor's own `prev` -- which is now a plain node read whether
@@ -711,6 +739,32 @@ impl<V: ListValue, const N: usize, const L: usize> ListsOf<V, N, L> {
     /// [`Error::InvalidArgument`] if `item` names no item,
     /// [`Error::NotActive`] if it is in no list.
     pub fn remove(&mut self, item: ItemId) -> Result<usize> {
+        self.unlink_inner(item).map(usize::from)
+    }
+
+    /// `uxListRemove` for the callers that do not want the count.
+    ///
+    /// Same work as [`ListsOf::remove`]; only the return shape differs.
+    /// `Result<usize>` is a scalar PAIR, which rv32 ilp32 returns through
+    /// MEMORY: every call site allocated a stack slot and passed its address
+    /// in `a0`, shifting the real arguments up a register. `Result<()>` is one
+    /// scalar and comes back in `a0`.
+    ///
+    /// Not one caller in the kernel reads the count — all of them spell it
+    /// `let _ = ...remove(x)` or ask `.is_ok()` — so the pair was paid for at
+    /// every site and read at none.
+    ///
+    /// # Errors
+    ///
+    /// As [`ListsOf::remove`].
+    pub fn unlink(&mut self, item: ItemId) -> Result<()> {
+        self.unlink_inner(item).map(|_| ())
+    }
+
+    /// The shared body. `#[inline(always)]` so the pair never crosses a real
+    /// call boundary: `unlink` drops the length and LLVM deletes it.
+    #[inline(always)]
+    fn unlink_inner(&mut self, item: ItemId) -> Result<u16> {
         // One read takes all three fields, and checks the handle once.
         let (prev, next, container) = {
             let n = self.item(item)?;
@@ -740,7 +794,7 @@ impl<V: ListValue, const N: usize, const L: usize> ListsOf<V, N, L> {
         // Wrapping: this is reached only after the item was found in this
         // list and unlinked from it, so the length is at least one.
         m.len = m.len.wrapping_sub(1);
-        Ok(usize::from(m.len))
+        Ok(m.len)
     }
 
     /// `listLIST_IS_EMPTY`.
@@ -750,6 +804,24 @@ impl<V: ListValue, const N: usize, const L: usize> ListsOf<V, N, L> {
     /// [`Error::InvalidArgument`] if `list` names no list.
     pub fn is_empty(&self, list: ListId) -> Result<bool> {
         Ok(self.list_meta(list)?.len == 0)
+    }
+
+    /// [`ListsOf::is_empty`] for a list id this crate DERIVED, not one a caller
+    /// supplied.
+    ///
+    /// Every call site passes `pending_ready_list()`, `queue_receive_list(..)`,
+    /// `timer_list()` or the like -- ids the declared geometry covers by
+    /// construction, which `Kernel::new` asserts. So the `Result` was rejecting
+    /// a value that cannot arrive, and the `?` it forced was paid at SIXTEEN
+    /// sites, each of them also comparing against `Ok(false)` -- a tag test and
+    /// a payload test where one suffices.
+    ///
+    /// A CALLER's id still goes through [`ListsOf::is_empty`], which
+    /// `tests/no_panic.rs` feeds ids in `0..LISTS + 2` on purpose. The bounds
+    /// check stays here too: a missing meta answers "empty", which is the safe
+    /// direction for every caller (they stop walking).
+    pub fn is_empty_of(&self, list: ListId) -> bool {
+        self.meta.get(usize::from(list)).map_or(true, |m| m.len == 0)
     }
 
     /// `listCURRENT_LIST_LENGTH`.
@@ -898,6 +970,34 @@ impl<V: ListValue, const N: usize, const L: usize> ListsOf<V, N, L> {
         Ok((!Self::is_end(n.next)).then_some(n.next))
     }
 
+    /// The next item AND this one's value, from a single lookup.
+    ///
+    /// `next` then `value` is two bounds-checked lookups of the same node,
+    /// and LLVM will NOT merge them: `next` carries an extra `NotActive` test
+    /// that can return early, which orders the second read after it. This is
+    /// the shape the third and fifth passes above identify as the only one
+    /// that wins here -- it deletes a FUNCTION BODY with its own branch and
+    /// its own `Result`, which is structure the compiler cannot invent away,
+    /// rather than a read `&mut self`'s `noalias` has already shared.
+    ///
+    /// Two SIBLING merges were tried and are NOT this shape, because nothing
+    /// blocks CSE between their halves: `head` then `value` (-0.12% x86-64 /
+    /// **+2.09% i686** in the fifth pass, and byte-identical on rv32 flash in
+    /// the sixth) and `value` then `set_value` (**+8 B** on rv32 flash, even
+    /// though a `&mut self` write stands between them -- the write does not
+    /// invalidate the index computation).
+    ///
+    /// # Errors
+    /// [`Error::InvalidArgument`] if `item` names no item;
+    /// [`Error::NotActive`] if it is in no list.
+    pub fn next_and_value(&self, item: ItemId) -> Result<(Option<ItemId>, V)> {
+        let n = self.item(item)?;
+        if n.container == NO_LIST {
+            return Err(Error::NotActive);
+        }
+        Ok(((!Self::is_end(n.next)).then_some(n.next), n.value))
+    }
+
     /// Every item in the list, in order.
     pub fn iter(&self, list: ListId) -> Iter<'_, V, N, L> {
         let (at, remaining) = match self.list_meta(list) {
@@ -962,7 +1062,7 @@ mod tests {
 
         let mut seen = Vec::new();
         for _ in 0..6 {
-            seen.push(l.next_round_robin(0).unwrap());
+            seen.push(l.next_round_robin(0).unwrap().unwrap());
         }
         let mut it = seen.iter();
         let a = it.next().copied().unwrap();

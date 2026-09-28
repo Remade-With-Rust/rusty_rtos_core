@@ -302,6 +302,22 @@ pub trait Trace {
     /// did and every existing implementation keeps compiling.
     const WANTS_NAMES: bool = true;
 
+    /// Whether this sink does anything with an event at all.
+    ///
+    /// `WANTS_NAMES` says a sink ignores the *name* a line carries. This says
+    /// it ignores the whole line — and that is a stronger licence, because a
+    /// kernel whose sink emits nothing need not DEFER anything either.
+    ///
+    /// The deferral is not free. A trace line the C emits after a call that
+    /// switched away has to be owed to the task and replayed when it next
+    /// runs, which costs a slot in `owed_trace`, a raised `owes_anything`
+    /// hint, and a later trip down `resume_pending`'s slow path — all to
+    /// reproduce a line a no-op sink drops.
+    ///
+    /// Defaulted to `true`, so a sink that says nothing behaves exactly as it
+    /// did and every existing implementation keeps compiling.
+    const EMITS: bool = true;
+
     /// An event, at the kernel's current tick count.
     fn event(&mut self, tick: u64, event: Event<'_>);
 }
@@ -313,6 +329,8 @@ pub struct NoTrace;
 impl Trace for NoTrace {
     // Nothing is read, so nothing needs building.
     const WANTS_NAMES: bool = false;
+    // And nothing is emitted, so nothing needs deferring either.
+    const EMITS: bool = false;
 
     fn event(&mut self, _tick: u64, _event: Event<'_>) {}
 }
@@ -390,6 +408,7 @@ impl<T: Trace> Scheduling<T> {
 impl<T: Trace> Trace for Scheduling<T> {
     // Whatever the sink needs. A projection reads no name of its own.
     const WANTS_NAMES: bool = T::WANTS_NAMES;
+    const EMITS: bool = T::EMITS;
 
     fn note_exits(&mut self, exits: u64) {
         self.inner.note_exits(exits);

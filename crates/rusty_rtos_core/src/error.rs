@@ -12,44 +12,52 @@ use core::fmt;
 pub type Result<T> = core::result::Result<T, Error>;
 
 /// Why a kernel operation did not happen.
+///
+/// The discriminants start at ONE, not zero (win 18, 2026-09-25), so that `0` is a
+/// niche BELOW the valid range and `Result<(), Error>` can put `Ok` there. With
+/// the range at `0..=13` the layout put `Ok` at 255, and every test of "did this
+/// succeed?" cost `zext.b` + `li 0xff` + a compare -- three instructions, at 48
+/// sites -- where the C arm returns `BaseType_t` and tests it with one `bnez`.
+/// Nothing observes these values: there is no `repr`, and no path converts an
+/// `Error` to a number.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum Error {
     /// The wait ran out before the condition held (`pdFALSE` from a blocking
     /// call, `errQUEUE_EMPTY` / `errQUEUE_FULL` in the queue API).
-    Timeout,
+    Timeout = 1,
     /// A queue, buffer or set has no room for the item.
-    Full,
+    Full = 2,
     /// A queue or buffer has nothing to take.
-    Empty,
+    Empty = 3,
     /// No slot, heap block or stack could be found
     /// (`errCOULD_NOT_ALLOCATE_REQUIRED_MEMORY`).
-    NoMemory,
+    NoMemory = 4,
     /// The handle names an object that no longer exists (a generation
     /// mismatch). In C this is a use-after-free; here it is a value.
-    Gone,
+    Gone = 5,
     /// The handle never named an object (out of range or the null handle).
-    InvalidHandle,
+    InvalidHandle = 6,
     /// A priority at or above `Config::MAX_PRIORITIES`.
-    InvalidPriority,
+    InvalidPriority = 7,
     /// A size, count or index outside what the configuration allows.
-    InvalidArgument,
+    InvalidArgument = 8,
     /// The call is not allowed from an interrupt (use the `*_from_isr`
     /// variant with an [`crate::isr::Isr`] token).
-    InIsr,
+    InIsr = 9,
     /// The call is only allowed from an interrupt.
-    NotInIsr,
+    NotInIsr = 10,
     /// The scheduler is suspended and the call would block
     /// (`errQUEUE_BLOCKED`).
-    SchedulerSuspended,
+    SchedulerSuspended = 11,
     /// The object is in use in a way that refuses the operation (a mutex held
     /// by another task, an item already in a list).
-    Busy,
+    Busy = 12,
     /// The object is not in the state the operation needs (a timer that is
     /// not active, an item in no list).
-    NotActive,
+    NotActive = 13,
     /// The kernel was built without the subsystem (a cargo feature is off).
-    Unsupported,
+    Unsupported = 14,
 }
 
 impl Error {

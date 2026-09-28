@@ -17,16 +17,51 @@ use crate::handle::{Handle, Kind};
 
 /// One slot: its generation (odd while occupied, even while free, never
 /// zero after the first use so a live handle never has generation 0).
+/// One slot. Liveness is the GENERATION'S PARITY, not a discriminant.
+///
+/// `insert` makes an even generation odd and `remove` makes it even again —
+/// the arena has always maintained that, and said so — so the `Option` that
+/// used to wrap the value was carrying a fact the generation already had. It
+/// cost a tag plus its alignment padding on every slot of every arena: a
+/// 40-byte `Timer` sat in a 56-byte slot, and now sits in 48.
+///
+/// `forbid(unsafe_code)` means a free slot still has to hold a real `T`, so
+/// it holds `T::default()`. Nothing ever reads it: every path to a value goes
+/// through a generation test first, and a free slot's generation is even
+/// while every handle ever issued carries an odd one.
 struct Slot<T> {
-    generation: u16,
-    value: Option<T>,
+    generation: u32,
+    value: T,
 }
 
-impl<T> Slot<T> {
-    const EMPTY: Self = Self {
-        generation: 0,
-        value: None,
-    };
+/// The bit that marks a slot FREE. It is bit 16, which is ABOVE the sixteen a
+/// generation arriving from the C ABI can occupy — `Handle::from_raw` takes its
+/// generation from `raw >> 16` of a `u32`, so no forged handle can ever carry it.
+///
+/// That is the whole trick. The old encoding put liveness in the generation's
+/// PARITY: free slots even, live slots odd, every issued handle odd. It worked,
+/// but it cost `Handle::from_raw` a normalisation at every C entry point — an
+/// even generation had to be folded to NULL, because a forged even generation
+/// could otherwise match a free slot's own even generation and resolve to the
+/// `T::default()` sitting in it. That was 26 `andi` inside the FFI wrappers.
+///
+/// With the marker out of reach of the ABI, the comparison in `resolve` does the
+/// work by itself: a free slot's generation is at least `FREE`, and a handle's is
+/// at most `0xFFFF`, so they can never be equal. `from_raw` normalises nothing.
+///
+/// It also doubles the generation space. Parity spent half of it: 32,767 odd
+/// values before a slot's generation repeated. A plain counter gives 65,535.
+///
+/// REFUTED 2026-09-24: storing the whole ABI word in the slot instead, so
+/// `from_raw` keeps what it was handed, takes `srli` -26 and `andi` -6 but
+/// costs flash **+108 B** and `mv` **+10** — minting a handle then needs a
+/// shift and an `or` at every `from_parts`, which outweighs what the
+/// comparison saves. This encoding stays.
+const FREE: u32 = 1 << 16;
+
+/// Whether a generation says its slot is live.
+const fn live(generation: u32) -> bool {
+    generation & FREE == 0
 }
 
 /// `N` slots of `T`, addressed by generational [`Handle<K>`].
@@ -36,13 +71,13 @@ pub struct Arena<K: Kind, T, const N: usize> {
     kind: core::marker::PhantomData<K>,
 }
 
-impl<K: Kind, T, const N: usize> Default for Arena<K, T, N> {
+impl<K: Kind, T: Default, const N: usize> Default for Arena<K, T, N> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<K: Kind, T, const N: usize> Arena<K, T, N> {
+impl<K: Kind, T: Default, const N: usize> Arena<K, T, N> {
     /// The capacity as a compile-time check: a handle index must fit.
     const CAPACITY_FITS: () = assert!(
         N <= Handle::<K>::MAX_INDEX as usize,
@@ -50,11 +85,21 @@ impl<K: Kind, T, const N: usize> Arena<K, T, N> {
     );
 
     /// An empty arena.
+    ///
+    /// Not `const`: a free slot holds `T::default()` and `Default` is not a
+    /// const trait. Nothing built one in a const context — only `size_of`
+    /// names the type there, which needs no value.
     #[must_use]
-    pub const fn new() -> Self {
+    pub fn new() -> Self {
         let () = Self::CAPACITY_FITS;
         Self {
-            slots: [const { Slot::EMPTY }; N],
+            slots: core::array::from_fn(|_| Slot {
+                // FREE, with the counter at 1. The counter never reaches zero
+                // (`try_insert` wraps to 1), because zero is the null handle's
+                // generation and `resolve` compares generations directly.
+                generation: FREE | 1,
+                value: T::default(),
+            }),
             len: 0,
             kind: core::marker::PhantomData,
         }
@@ -99,51 +144,56 @@ impl<K: Kind, T, const N: usize> Arena<K, T, N> {
     /// # Errors
     /// The value itself, when every slot is occupied.
     pub fn try_insert(&mut self, value: T) -> core::result::Result<Handle<K>, T> {
-        let Some(index) = self.slots.iter().position(|s| s.value.is_none()) else {
+        let Some(index) = self.slots.iter().position(|s| !live(s.generation)) else {
             return Err(value);
         };
         let Some(slot) = self.slots.get_mut(index) else {
             return Err(value);
         };
-        // A free slot's generation is even (or 0); occupying it makes it odd.
-        // Wrapping past u16::MAX skips 0 so a live handle is never null.
-        let mut generation = slot.generation.wrapping_add(1);
-        if generation == 0 {
+        // Occupying a slot advances its counter and clears `FREE`. Past
+        // `u16::MAX` it wraps to 1, never 0, so a live handle is never null.
+        let mut generation = (slot.generation & 0xFFFF).wrapping_add(1);
+        if generation > u32::from(u16::MAX) || generation == 0 {
             generation = 1;
         }
         slot.generation = generation;
-        slot.value = Some(value);
+        slot.value = value;
         // Wrapping: a free slot was found, so the arena is not full and
         // the count is below `N`.
         self.len = self.len.wrapping_add(1);
         // `index < N <= MAX_INDEX`, so the conversion cannot truncate.
-        Ok(Handle::from_parts(index as u16, generation))
+        Ok(Handle::from_parts(index as u32, generation))
     }
 
     /// The object `handle` names.
     #[must_use]
     pub fn get(&self, handle: Handle<K>) -> Option<&T> {
-        let slot = self.slots.get(usize::from(handle.index()))?;
+        let slot = self.slots.get(handle.index() as usize)?;
         if slot.generation != handle.generation() {
             return None;
         }
-        slot.value.as_ref()
+        Some(&slot.value)
     }
 
     /// The object `handle` names, mutably.
     #[must_use]
     pub fn get_mut(&mut self, handle: Handle<K>) -> Option<&mut T> {
-        let slot = self.slots.get_mut(usize::from(handle.index()))?;
+        let slot = self.slots.get_mut(handle.index() as usize)?;
         if slot.generation != handle.generation() {
             return None;
         }
-        slot.value.as_mut()
+        Some(&mut slot.value)
     }
 
     /// Why a handle that did not resolve did not resolve.
     ///
     /// Only the two error arms call this, so asking costs nothing on a
     /// lookup that succeeds -- which is all but a vanishing few of them.
+    /// That is bought by the BRANCH, not by outlining: the call sits inside
+    /// the error arm either way. Outlined it was three branchless
+    /// instructions behind `mv` + `jal` at 18 sites; `#[inline]` lets each
+    /// site produce the code in place.
+    #[inline]
     fn why(handle: Handle<K>) -> Error {
         if handle.is_null() {
             Error::InvalidHandle
@@ -161,12 +211,12 @@ impl<K: Kind, T, const N: usize> Arena<K, T, N> {
     pub fn resolve(&self, handle: Handle<K>) -> Result<&T> {
         let slot = self
             .slots
-            .get(usize::from(handle.index()))
+            .get(handle.index() as usize)
             .ok_or(Error::InvalidHandle)?;
         if slot.generation != handle.generation() {
             return Err(Self::why(handle));
         }
-        slot.value.as_ref().ok_or_else(|| Self::why(handle))
+        Ok(&slot.value)
     }
 
     /// Like [`Arena::resolve`], mutably.
@@ -176,26 +226,69 @@ impl<K: Kind, T, const N: usize> Arena<K, T, N> {
     pub fn resolve_mut(&mut self, handle: Handle<K>) -> Result<&mut T> {
         let slot = self
             .slots
-            .get_mut(usize::from(handle.index()))
+            .get_mut(handle.index() as usize)
             .ok_or(Error::InvalidHandle)?;
         if slot.generation != handle.generation() {
             return Err(Self::why(handle));
         }
-        slot.value.as_mut().ok_or_else(|| Self::why(handle))
+        Ok(&mut slot.value)
     }
 
     /// Remove the object `handle` names, invalidating the handle and every
     /// copy of it.
     #[must_use]
+    /// Free the slot `handle` names without handing the value back.
+    ///
+    /// Same state change as [`Arena::remove`] -- `FREE` set, `len`
+    /// decremented, the old handle dead -- but it does not MOVE the value out,
+    /// and that is the whole point. `remove` answers `Option<T>`, which for a
+    /// `Tcb` is over a hundred bytes returned THROUGH MEMORY: the caller gets a
+    /// stack buffer, `mem::take` copies the value into it, and `T::default()`
+    /// is written over the slot with a `memset` CALL. Every arena removal in
+    /// this kernel is spelled `let _ = ...remove(x)` -- not one reads the value
+    /// -- so all of that filled a buffer that is dropped on the next line.
+    ///
+    /// Leaving the old value in the slot is sound because nothing can reach it:
+    /// the slot's generation now carries [`FREE`], which no handle can equal,
+    /// and `try_insert` overwrites the value before handing out a new handle.
+    /// It is the same argument [`Arena::remove`]'s own doc makes about the
+    /// generation bump, applied to the value as well.
+    ///
+    /// `Drop` is the one thing that cannot be left to chance, so it is not:
+    /// `needs_drop` is a `const fn`, so for a `T` that owns something this
+    /// still writes the default and runs the old value's destructor exactly
+    /// where `remove` ran it, and for plain data the whole branch folds away.
+    ///
+    /// Returns whether a live object was there.
+    pub fn discard(&mut self, handle: Handle<K>) -> bool {
+        let Some(slot) = self.slots.get_mut(handle.index() as usize) else {
+            return false;
+        };
+        if slot.generation != handle.generation() {
+            return false;
+        }
+        if core::mem::needs_drop::<T>() {
+            slot.value = T::default();
+        }
+        slot.generation |= FREE;
+        // Wrapping: the generation matched, so a live value was here and the
+        // count is at least one.
+        self.len = self.len.wrapping_sub(1);
+        true
+    }
+
     pub fn remove(&mut self, handle: Handle<K>) -> Option<T> {
-        let slot = self.slots.get_mut(usize::from(handle.index()))?;
+        let slot = self.slots.get_mut(handle.index() as usize)?;
         if slot.generation != handle.generation() {
             return None;
         }
-        let value = slot.value.take()?;
-        // Freeing bumps the generation again (odd -> even), so the old
-        // handle can never match a future occupant.
-        slot.generation = slot.generation.wrapping_add(1);
+        let value = core::mem::take(&mut slot.value);
+        // Freeing sets `FREE` and leaves the counter alone; the next
+        // `try_insert` advances it. The handle just invalidated compared equal
+        // to the bare counter, and now the slot holds `FREE | counter`, which no
+        // handle can equal — so it is dead the instant this store lands, and
+        // dead again under a different counter when the slot is reused.
+        slot.generation |= FREE;
         // Wrapping: `take` above answered `Some`, so a live value was
         // here and the count is at least one.
         self.len = self.len.wrapping_sub(1);
@@ -204,33 +297,31 @@ impl<K: Kind, T, const N: usize> Arena<K, T, N> {
 
     /// Every live `(handle, object)` in slot order.
     pub fn iter(&self) -> impl Iterator<Item = (Handle<K>, &T)> + '_ {
-        self.slots.iter().enumerate().filter_map(|(i, s)| {
-            s.value
-                .as_ref()
-                .map(|v| (Handle::from_parts(i as u16, s.generation), v))
-        })
+        self.slots
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| live(s.generation))
+            .map(|(i, s)| (Handle::from_parts(i as u32, s.generation), &s.value))
     }
 
     /// Every live `(handle, object)` in slot order, mutably.
     pub fn iter_mut(&mut self) -> impl Iterator<Item = (Handle<K>, &mut T)> + '_ {
-        self.slots.iter_mut().enumerate().filter_map(|(i, s)| {
-            let generation = s.generation;
-            s.value
-                .as_mut()
-                .map(|v| (Handle::from_parts(i as u16, generation), v))
-        })
+        self.slots
+            .iter_mut()
+            .enumerate()
+            .filter(|(_, s)| live(s.generation))
+            .map(|(i, s)| (Handle::from_parts(i as u32, s.generation), &mut s.value))
     }
 
     /// The handle of the object at slot `index`, if live.
     #[must_use]
     pub fn handle_at(&self, index: u16) -> Option<Handle<K>> {
         let slot = self.slots.get(usize::from(index))?;
-        slot.value.as_ref()?;
-        Some(Handle::from_parts(index, slot.generation))
+        live(slot.generation).then(|| Handle::from_parts(index as u32, slot.generation))
     }
 }
 
-impl<K: Kind, T: fmt::Debug, const N: usize> fmt::Debug for Arena<K, T, N> {
+impl<K: Kind, T: fmt::Debug + Default, const N: usize> fmt::Debug for Arena<K, T, N> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_map().entries(self.iter()).finish()
     }
@@ -291,9 +382,55 @@ mod tests {
     }
 
     #[test]
+    /// The invariant that replaced `Handle::from_raw`'s parity normalisation.
+    ///
+    /// A free slot is marked with a bit ABOVE the sixteen `from_raw` can
+    /// produce, so no handle a C caller can forge may resolve to one. This is
+    /// checked EXHAUSTIVELY over the whole forgeable generation space, because
+    /// the old encoding's defence was an explicit fold and this one is a layout
+    /// fact — if the fact ever stops holding, the fold is not there to catch it.
+    ///
+    /// It sweeps WHICH slot is live as well, which the first version of this
+    /// test did not. That version pinned slot 1 as the live one, and a later
+    /// experiment moved the free marker into the index half — where a collision
+    /// is only reachable when the FREE slot sits at the index the marker names.
+    /// Poisoning that encoding did not fail this test. A test that fixes the
+    /// arrangement can only refute the arrangements it fixed.
+    #[test]
+    fn no_forgeable_handle_resolves_to_a_free_slot() {
+        const N: u32 = 3;
+        for live_at in 0..N {
+            let mut a = Arena::<Task, u8, 3>::new();
+            // Fill, then free everything except `live_at`, so every slot has
+            // been occupied once and the survivor varies across the sweep.
+            let handles: [Handle<Task>; 3] =
+                [a.insert(1).unwrap(), a.insert(2).unwrap(), a.insert(3).unwrap()];
+            for (i, h) in handles.iter().enumerate() {
+                if i as u32 != live_at {
+                    a.remove(*h).unwrap();
+                }
+            }
+            let live = handles[live_at as usize];
+            for generation in 0..=u32::from(u16::MAX) {
+                for index in 0..N {
+                    let forged = Handle::<Task>::from_raw((generation << 16) | index);
+                    if forged == live {
+                        assert!(a.resolve(forged).is_ok());
+                        continue;
+                    }
+                    assert!(
+                        a.resolve(forged).is_err(),
+                        "live_at {live_at}: forged generation {generation}                          resolved at slot {index}"
+                    );
+                    assert!(a.get(forged).is_none());
+                }
+            }
+        }
+    }
+
     fn generations_never_mint_a_null_handle() {
         let mut a = Arena::<Task, u8, 1>::new();
-        let mut last = 0u16;
+        let mut last = 0u32;
         for _ in 0..70_000u32 {
             let h = a.insert(0).unwrap();
             assert!(!h.is_null());
