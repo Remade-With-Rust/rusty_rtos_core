@@ -110,6 +110,18 @@ mod tests {
     #[test]
     fn the_pin_is_what_the_manifest_says() {
         // Moving the pin is a conscious act: the manifest and this line change together.
-        assert_eq!(super::VERSION, "2.2.0");
+        //
+        // 2.2.1 (2026-09-28): a patch release, and a large one for a consumer.
+        // `GlobalAlloc`'s methods became `#[inline]` as the `mimalloc` crate's
+        // are, so rustc's `__rust_alloc`/`__rust_dealloc` shims carry the fast
+        // path instead of jumping to it -- measured whole-program at -21.1%
+        // and -5.8% on two deterministic Rust workloads. `realloc` now keeps a
+        // block in place at ANY alignment when it fits (-27.3% on an
+        // over-aligned buffer workload), and layouts aligned to two words come
+        // from the natural size classes, which is every hashbrown table. Two
+        // fixes came with it: growing a huge block no longer copies its whole
+        // reservation, and process start-up makes 12 allocations where it made
+        // 251. No API change, so the seam re-exports exactly what it did.
+        assert_eq!(super::VERSION, "2.2.1");
     }
 }
