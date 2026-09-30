@@ -407,10 +407,23 @@ impl<V: ListValue> Node<V> {
 /// What a `List_t` keeps beside its `xListEnd`: the round-robin cursor and
 /// the count.
 ///
-/// Deliberately NOT in the node array. These two are touched once per
-/// operation; `prev`/`next`/`value` are touched once per link followed.
-/// Keeping them apart stops the walk pulling a cursor and a length it has no
-/// use for through the cache with every step.
+/// Deliberately NOT in the node array -- and the reason is ALIASING, not the
+/// cache. Being a different array from `nodes` hands LLVM a fact it cannot
+/// derive otherwise: a write to `meta[l].len` can never touch `nodes[x].next`,
+/// so node fields stay in registers across every count and cursor update.
+///
+/// Measured 2026-09-30 (`bench/variants/v1_meta_in_marker.rs`): folding these
+/// two into the marker node fits the padding exactly -- `value 8 + prev 2 +
+/// next 2 + container 1` is 13 in a 16-byte stride, and `cursor u16 + len u8`
+/// is the 3 spare -- so the walk loads the same bytes and `switch_context`
+/// drops its second address base (−3 rv32 instructions, real). And it LOSES:
+/// list-ir **+445,994 (+3.6%)** x86-64 / +358,001 i686, kdelay-ir +16,147,
+/// ksched-ir +28,139, checksums identical; rv32 `switch_select` only −1
+/// (LLVM re-laid the loop so the hot path jumps over the walk-down),
+/// `queue_roundtrip` +3. The line that indexes `nodes` got 100,000 cheaper and
+/// the whole got 446,000 dearer: reloads in every caller. The original
+/// cache argument was not why this pays; the no-alias fact is, and it is worth
+/// more than the base it costs.
 #[derive(Clone, Copy)]
 struct Meta {
     /// `pxIndex`, the round-robin cursor. Starts at the list's own marker.
