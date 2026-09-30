@@ -953,7 +953,18 @@ impl<V: ListValue, const N: usize, const L: usize> ListsOf<V, N, L> {
             next = self.at(next).next;
         }
         self.list_meta_mut(list)?.cursor = next;
-        Ok((!Self::is_end(next)).then_some(next))
+        // `next` cannot be a marker here. The only marker reachable from a
+        // cursor is this list's own end, the branch above stepped past it, and
+        // the marker's `next` is itself ONLY when the list is empty -- which
+        // `len != 0` has just excluded. So the `is_end` test this returned
+        // through was a range compare on a value the two tests above already
+        // bound, costing `li` + `bltu` on every round-robin (rv32 has no
+        // compare-immediate branch). A corrupt list still cannot escape: a
+        // marker id is above every task item, so the caller's `handle_at`
+        // rejects it one step later with `Stall::UnknownTask` instead of
+        // `NoReadyTask`.
+        debug_assert!(!Self::is_end(next), "round-robin stepped onto a marker");
+        Ok(Some(next))
     }
 
     /// The item after this one, or `None` at the end of the list.
