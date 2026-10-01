@@ -122,6 +122,12 @@ mod tests {
         // fixes came with it: growing a huge block no longer copies its whole
         // reservation, and process start-up makes 12 allocations where it made
         // 251. No API change, so the seam re-exports exactly what it did.
-        assert_eq!(super::VERSION, "2.2.1");
+        //
+        // 2.2.2 (2026-10-01): fixes only, no API change. 2.2.1 did not compile
+        // on macOS (`mincore`'s out-vector type differs on Apple), so neither
+        // did this crate's `alloc` feature there; 2.2.2 builds, and also asks
+        // the Mach region table rather than `mincore` whether a managed range
+        // is mapped, and fixes a `blockmap` abort under segment adoption.
+        assert_eq!(super::VERSION, "2.2.2");
     }
 }

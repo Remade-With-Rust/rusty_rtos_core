@@ -139,7 +139,7 @@ key material, H-20 reopens here.
 
 1. **`rusty_alloc` is sound.** `rusty_rtos_alloc` forbids `unsafe` itself but
    hands out `rusty_alloc`'s allocator, whose `unsafe` is audited in that
-   unit, at an EXACT pin (`=2.2.1`) because earlier releases carried
+   unit, at an EXACT pin (`=2.2.2`) because earlier releases carried
    use-after-frees.
 2. **The kernel calls the list API correctly where it relies on invariants
    it established itself** (e.g. `unlink` of an item it knows is linked).

@@ -3,6 +3,15 @@
 Security-relevant changes are called out under **Security** (hardening gate
 H-38). Versions follow SemVer; in 0.x a minor bump may break the API.
 
+## 0.2.3 — 2026-10-01
+
+### Fixed
+- `rusty_rtos_alloc` pins `rusty_alloc` / `rusty_alloc-api` `=2.2.2`. 2.2.1
+  did not compile on macOS (`mincore`'s out-vector type differs on Apple), so
+  this crate's `alloc` feature, and CI's macOS host job, could not build
+  there. 2.2.2 also fixes `range_is_reserved` on macOS and a `blockmap`
+  abort under multi-threaded segment adoption.
+
 ## 0.2.2 — 2026-10-01
 
 ### Security
