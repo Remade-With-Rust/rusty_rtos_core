@@ -277,6 +277,10 @@ impl<K: Kind, T: Default, const N: usize> Arena<K, T, N> {
         true
     }
 
+    /// Take the value out and free its slot, if `handle` still names it.
+    ///
+    /// `None` for a handle that is stale, forged or already removed -- and the
+    /// slot's generation moves on, so no copy of this handle resolves again.
     pub fn remove(&mut self, handle: Handle<K>) -> Option<T> {
         let slot = self.slots.get_mut(handle.index() as usize)?;
         if slot.generation != handle.generation() {
@@ -381,7 +385,6 @@ mod tests {
         assert!(!a.contains(Handle::from_parts(0, 1)));
     }
 
-    #[test]
     /// The invariant that replaced `Handle::from_raw`'s parity normalisation.
     ///
     /// A free slot is marked with a bit ABOVE the sixteen `from_raw` can
@@ -403,14 +406,17 @@ mod tests {
             let mut a = Arena::<Task, u8, 3>::new();
             // Fill, then free everything except `live_at`, so every slot has
             // been occupied once and the survivor varies across the sweep.
-            let handles: [Handle<Task>; 3] =
-                [a.insert(1).unwrap(), a.insert(2).unwrap(), a.insert(3).unwrap()];
+            let handles: [Handle<Task>; 3] = [
+                a.insert(1).unwrap(),
+                a.insert(2).unwrap(),
+                a.insert(3).unwrap(),
+            ];
             for (i, h) in handles.iter().enumerate() {
                 if i as u32 != live_at {
                     a.remove(*h).unwrap();
                 }
             }
-            let live = handles[live_at as usize];
+            let live = *handles.get(live_at as usize).unwrap();
             for generation in 0..=u32::from(u16::MAX) {
                 for index in 0..N {
                     let forged = Handle::<Task>::from_raw((generation << 16) | index);
@@ -428,6 +434,7 @@ mod tests {
         }
     }
 
+    #[test]
     fn generations_never_mint_a_null_handle() {
         let mut a = Arena::<Task, u8, 1>::new();
         let mut last = 0u32;

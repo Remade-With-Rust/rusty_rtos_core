@@ -463,7 +463,6 @@ impl<V: ListValue, const N: usize, const L: usize> ListsOf<V, N, L> {
     /// `N - 1`. See [`slots_for`] for why this exists.
     const MASK: usize = N.wrapping_sub(1);
 
-
     const SIZES_FIT: () = assert!(
         N.is_power_of_two() && L > 0 && L < N && N <= 0x8000 && L <= u8::MAX as usize,
         "N must be a power of two, greater than L, at most 32768; use `slots_for`"
@@ -483,7 +482,8 @@ impl<V: ListValue, const N: usize, const L: usize> ListsOf<V, N, L> {
         }; L];
         let mut l = 0;
         while l < L {
-            let at = Self::CAPACITY + l;
+            // Below `N`: `l < L` and `SIZES_FIT` asserts `CAPACITY + L == N`.
+            let at = Self::CAPACITY.wrapping_add(l);
             let marker = at as u16;
             nodes[at] = Node {
                 // `vListInitialise`: `xListEnd.xItemValue = portMAX_DELAY`.
@@ -508,6 +508,10 @@ impl<V: ListValue, const N: usize, const L: usize> ListsOf<V, N, L> {
     ///
     /// Only valid once the caller has checked `list` names a list — every
     /// public entry point does that through [`ListsOf::list_meta`] first.
+    #[allow(
+        clippy::arithmetic_side_effects,
+        reason = "at most 0x8000 + 255, which SIZES_FIT bounds; kept as `+` so this hot path's code is unchanged"
+    )]
     const fn end_of(list: ListId) -> u16 {
         (Self::CAPACITY + list as usize) as u16
     }
@@ -834,7 +838,7 @@ impl<V: ListValue, const N: usize, const L: usize> ListsOf<V, N, L> {
     /// check stays here too: a missing meta answers "empty", which is the safe
     /// direction for every caller (they stop walking).
     pub fn is_empty_of(&self, list: ListId) -> bool {
-        self.meta.get(usize::from(list)).map_or(true, |m| m.len == 0)
+        self.meta.get(usize::from(list)).is_none_or(|m| m.len == 0)
     }
 
     /// `listCURRENT_LIST_LENGTH`.
