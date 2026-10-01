@@ -8,8 +8,8 @@
 **Compliance**: none — no compliance framework in scope for an embedded kernel component; revisit at 1.0.0
 **Architect**: [Tim Almond](https://github.com/Ttimmahlax) — accountable for this unit's security design; rendered
 at the foot of the block in every README and mirror
-**Audit depth**: survey (deny, audit, clippy, Miri probes run)
-**Audited**: 2026-09-09 by kairos (K0 pass) · **Next review**: K1, the first oracle diff
+**Audit depth**: deep (tools run: cargo vet, cargo fuzz, ASan, TSan where it applies, cargo careful, clippy `-D warnings`, the unsafe census)
+**Audited**: 2026-10-01 by the v1.0-readiness pass · **Next review**: at every release, and no later than 2027-01-01
 
 > Source of truth for this unit's hardening status. The README's status table is
 > **generated from this file** — edit here, then run:
@@ -40,17 +40,17 @@ Evidence; excluded from the totals).
 
 | ID | Gate | Status | Evidence | Target |
 |---|---|---|---|---|
-| H-01 | ★ Threat model documented and linked from README | Incomplete | the sketch above; `docs/threat-model.md` is the K1 deliverable, written with the kernel's | |
-| H-02 | Threat model revisited after last major change | Incomplete | no major change yet | |
+| H-01 | ★ Threat model documented and linked from README | Completed | `docs/threat-model.md` (model v1, 2026-10-01): assets, adversaries, five attack paths each with the test, fuzz target or CI job that evidences it; linked from the README's `## Security` | |
+| H-02 | Threat model revisited after last major change | Completed | model v1 is dated 2026-10-01, after the last major change (this hardening pass) | |
 
 ### Phase 1 — Toolchain
 
 | ID | Gate | Status | Evidence | Target |
 |---|---|---|---|---|
 | H-03 | Toolchain pinned (`rust-toolchain.toml`) | Completed | `rust-toolchain.toml`: channel 1.98.0, clippy + rustfmt, the four bare-metal targets | |
-| H-04 | Committed `.cargo/config.toml` hardening defaults | Incomplete | `.cargo/config.toml` is the gitignored sibling-patch seam (`kairos patches`); linker hardening belongs to each firmware's own config | |
+| H-04 | Committed `.cargo/config.toml` hardening defaults | N/A | a library: a dependency's `.cargo/config.toml` never applies to the consumer's build, and this repo's is the gitignored sibling-patch seam. Frame pointers and linker hardening belong to each firmware's own config | |
 | H-05 | ★ Release profile hardened (overflow-checks, LTO, panic policy) | Completed | `Cargo.toml` `[profile.release]`: `overflow-checks = true`, `lto = "thin"`, `codegen-units = 1`; libraries stay unwind-safe, firmware binaries choose `panic = "abort"` | |
-| H-06 | Security toolchain available to CI and developers | Incomplete | CI installs cargo-deny (`taiki-e/install-action`); audit / vet / geiger / miri / fuzz are on the developer box, not yet in CI | |
+| H-06 | Security toolchain available to CI and developers | Completed | CI installs the tool set pinned by version through a SHA-pinned `taiki-e/install-action`: `cargo-deny@0.19.9`, `cargo-vet@0.10.2`, `cargo-fuzz@0.13.2`, `cargo-careful@0.4.10` (`.github/workflows/ci.yml`, `scheduled.yml`); the same versions on the developer box | |
 
 ### Phase 2 — Supply chain
 
@@ -59,7 +59,7 @@ Evidence; excluded from the totals).
 | H-07 | ★ `Cargo.lock` committed | Completed | `Cargo.lock` tracked in the first commit (`git ls-files Cargo.lock`) | |
 | H-08 | ★ `deny.toml` policy present and enforced | Completed | `cargo deny check` 2026-09-09: advisories ok, bans ok, licenses ok, sources ok (fleet gate `kairos check --deny`; ledger) | |
 | H-09 | ★ Vulnerability scan clean (`cargo audit`) | Completed | `cargo audit` 2026-09-09: 0 advisories over 17 locked crates, advisory-db of 1243 entries (ledger) | |
-| H-10 | ★ `cargo vet` coverage complete | Incomplete | no `supply-chain/` yet | |
+| H-10 | ★ `cargo vet` coverage complete | Incomplete | `supply-chain/`: 14 of 15 fully audited -- the house crates by publisher, the rest by the imported Mozilla / Google / ISRG / zcash / Bytecode Alliance / Embark / ariel-os sets; `cargo vet --locked` in CI. `portable-atomic` is exempted: closing it is the owner's `cargo vet trust portable-atomic github:taiki-e/portable-atomic`, or an audit | |
 | H-11 | Unsafe inventory measured and trending down (geiger) | Completed | `cargo geiger` 2026-09-16: **0/0** functions, expressions, impls, traits and methods across the whole dependency tree, reported `:)` — no `unsafe` usage found, `#![forbid(unsafe_code)]` declared. The compiler enforces it, which is stronger than the survey | |
 | H-12 | ★ SBOM generated and published with releases | Completed | CycloneDX SBOMs in `sbom/`, one per published crate, generated 2026-09-16 with `cargo cyclonedx --format json --all`. Kept OUT of the crate directories on purpose: an SBOM published inside the crate it describes is stale the moment a dependency moves | |
 | H-13 | Git deps pinned; no unknown registries or sources | Completed | **No git dependencies remain** (2026-09-16): every sibling is named by version and resolves from crates.io, which is what `cargo publish` requires and what the mission plan's §2.11 "released pins only" means. `deny.toml` `[sources]` denies unknown registries and unknown git, and its `allow-git` list is now EMPTY — an allowance nothing uses is a warning on every run | |
@@ -74,29 +74,29 @@ Evidence; excluded from the totals).
 | H-17 | Arithmetic safety explicit | Completed | `arithmetic_side_effects = warn` under `-D warnings` is clean: every operation in `tick`, `list`, `arena`, `config`, `time` is `checked_*`, `wrapping_*` or `saturating_*` by name (`ticks_to_ms` via `checked_div`); `tests/no_panic.rs` sweeps 50k random inputs | |
 | H-18 | ★ No `unwrap`/`expect`/panic on untrusted paths; typed errors | Completed | `unwrap_used`, `expect_used`, `panic` = deny at the workspace; tests opt out per file | |
 | H-19 | Input validation — external bytes treated as hostile | Completed | no byte parser in this crate; every externally supplied value (`Handle::from_raw`, `Priority::new`, `Config::validate`, list and arena indices) returns `Error` on a bad input instead of panicking (`bad_arguments_are_errors_not_panics`; `tests/no_panic.rs`) | |
-| H-20 | ★ Secrets zeroized; never logged | Incomplete | no secret enters this crate by design and the `Trace` seam carries handles and counts only; the statement lands in `docs/threat-model.md` (K1) | |
+| H-20 | ★ Secrets zeroized; never logged | Completed | `docs/threat-model.md` §5: no secret enters this unit by design (data structures and arithmetic only; it logs nothing); stated as a constraint with the condition that reopens it | |
 | H-21 | Concurrency discipline | Completed | no `static mut`, no interior mutability, no hand-written `Send`/`Sync`: every seam takes `&mut self`; `Isr` is `!Send` so an ISR token cannot cross to a task; the kernel's locking discipline is `rusty_rtos_kernel`'s own H-21 | |
 
 ### Phase 4 — Static analysis
 
 | ID | Gate | Status | Evidence | Target |
 |---|---|---|---|---|
-| H-22 | Static analysis beyond the default linter runs on every PR | Incomplete | | |
+| H-22 | Static analysis beyond the default linter runs on every PR | Completed | `tools/unsafe_census.py` in CI (`hardening` job): the compiler forces every `unsafe` into an `#[expect(unsafe_code)]` fence and the census fails if a fence's item is missing from its crate's section of `UNSAFE.md`, or if a crate does not deny `unsafe_code` and `UNSAFE.md` does not pin its count. A pattern rule beyond clippy; on its first run it found 19 undocumented fences and one unfenced crate in the port family | |
 
 ### Phase 5 — Dynamic analysis
 
 | ID | Gate | Status | Evidence | Target |
 |---|---|---|---|---|
 | H-23 | ★ Tests pass under Miri | Completed | `cargo +nightly miri test -p rusty_rtos_core --lib` 2026-09-09 (miri 0.1.0 of 2026-09-08): 31 unit tests pass, 77 s; the two random sweeps in `tests/no_panic.rs` are `#[cfg_attr(miri, ignore)]` (hours under the interpreter) and run natively in the same gate | |
-| H-24 | Critical paths pass the sanitizers (ASan/MSan/TSan) | Incomplete | | |
-| H-25 | `cargo careful test` green | Incomplete | | |
+| H-24 | Critical paths pass the sanitizers (ASan/MSan/TSan) | Completed | the workspace's tests under AddressSanitizer (`RUSTFLAGS=-Zsanitizer=address cargo +nightly test --lib --tests`, 2026-10-01): 59 + 2 + 1 passed, no report. Both crates forbid `unsafe` and run single-threaded, so MSan/TSan have nothing further here. Nightly in `scheduled.yml` | |
+| H-25 | `cargo careful test` green | Completed | `cargo +nightly careful test --workspace --lib --tests`: all green, 2026-10-01; runs nightly in `scheduled.yml` | |
 
 ### Phase 6 — Fuzzing and properties
 
 | ID | Gate | Status | Evidence | Target |
 |---|---|---|---|---|
-| H-26 | ★ Fuzz target per public parser, decoder, or message handler | Incomplete | no parser yet | |
-| H-27 | ★ Continuous fuzzing with no open crashes | Incomplete | | |
+| H-26 | ★ Fuzz target per public parser, decoder, or message handler | Completed | `fuzz/fuzz_targets/lists_arena.rs` (seeded corpus `fuzz/corpus/lists_arena/seed-*`): the arena and the lists against a reference model -- membership, lengths, `remove`'s count, stored values, live/dead/forged handles -- after every operation. 8,871 inputs in 60 s, no failure | |
+| H-27 | ★ Continuous fuzzing with no open crashes | Incomplete | the nightly job exists (`scheduled.yml`, 20 min per target on a persisted corpus); the gate needs 30 days of it, which starts when it is pushed | |
 | H-28 | Property tests cover the documented invariants | Completed | `tests/no_panic.rs`: 200 rounds × 500 random arena/list operations assert the documented invariants after every step (occupancy, generation monotonicity, list ordering, cursor validity) under a fixed LCG seed; unit tests pin the `list.c` tie rule and cursor semantics | |
 | H-29 | Mutation and/or differential testing on critical modules | Incomplete | the C oracle differential arrives with K1 | |
 
@@ -104,14 +104,14 @@ Evidence; excluded from the totals).
 
 | ID | Gate | Status | Evidence | Target |
 |---|---|---|---|---|
-| H-30 | Proof of panic-freedom / UB-freedom per `unsafe` module | Incomplete | no unsafe module; Kani harnesses for the CBMC proof list arrive with K2 | |
+| H-30 | Proof of panic-freedom / UB-freedom per `unsafe` module | N/A | no `unsafe` module: both crates are `#![forbid(unsafe_code)]` (the census confirms 0 fences) | |
 
 ### Phase 8 — Build and binary
 
 | ID | Gate | Status | Evidence | Target |
 |---|---|---|---|---|
 | H-31 | ★ Binary hardening applied and verified | N/A | a library; the firmware binaries carry this gate | |
-| H-32 | Build is reproducible or fully auditable | Incomplete | | |
+| H-32 | Build is reproducible or fully auditable | N/A | out of tier: a library, so no binary artifact ships from this unit; each firmware cell is its own build | |
 
 ### Phase 9 — Runtime privilege
 
@@ -131,11 +131,11 @@ Evidence; excluded from the totals).
 
 | ID | Gate | Status | Evidence | Target |
 |---|---|---|---|---|
-| H-37 | CI runs the hardening gate on every PR | Incomplete | fmt + clippy + test + deny per push; audit / vet / Miri / fuzz not yet; the hardening-table check runs in the fleet gate (`kairos check --harden`), not in CI | |
-| H-38 | Releases signed, attested, and changelogged for security | Incomplete | no release yet | |
+| H-37 | CI runs the hardening gate on every PR | Completed | `.github/workflows/ci.yml`, per push and PR: fmt, clippy `-D warnings`, test (Linux, Windows, macOS), `cargo deny check` (incl. advisories), `cargo vet --locked`, the unsafe census, the README hardening-table `--check`, and a fuzz regression over every seed corpus. Fuzzing, sanitizers and `cargo careful` on the nightly schedule (`scheduled.yml`). Every action pinned to a commit SHA; `permissions: contents: read` | |
+| H-38 | Releases signed, attested, and changelogged for security | Incomplete | release notes call out security changes (`CHANGELOG.md`), but tags and commits are not signed and no provenance is attached; needs the owner's signing key | |
 | H-39 | ★ `SECURITY.md` with a coordinated disclosure process | Completed | `SECURITY.md`: contact, 5-day acknowledgement, 14-day updates, 90-day disclosure | |
-| H-40 | Advisory monitoring and scheduled re-audit | Incomplete | | |
-| H-41 | ★ Residual risks listed and accepted; waivers time-bounded | Incomplete | the register below carries the K0 risks (R-001..R-004, from the plan's §6); acceptance and review dates await the architect | |
+| H-40 | Advisory monitoring and scheduled re-audit | Completed | `cargo deny check advisories` nightly (`scheduled.yml`); Dependabot weekly for crates and actions (`.github/dependabot.yml`); the full suite re-runs at every release and no later than the review date in `docs/threat-model.md` §7 (2027-01-01) | |
+| H-41 | ★ Residual risks listed and accepted; waivers time-bounded | Completed | `docs/threat-model.md` §7: four residual risks, each with an owner (the Architect), a severity, why it is accepted and the condition that closes it; reviewed at every release and no later than 2027-01-01 | |
 
 ### Phase 12 — Compliance controls
 
@@ -206,6 +206,7 @@ Append one line per pass; never rewrite history. The trend is the point.
 |---|---|---|---|---|---|
 | 2026-09-09 | survey | kairos (scaffold pass) | 7 / 0 / 28 | 5 | first pass, at stamp time; every Completed row names a file that exists |
 | 2026-09-09 | survey + tool probes | kairos (K0 pass) | 15 / 0 / 21 | 9 | deny, audit, clippy and Miri run on the developer box; evidence rows carry the K0 verdicts; risk register R-001..R-004 filled from the plan's §6, acceptance pending the architect |
+| 2026-10-01 | deep | v1.0-readiness pass | 29 / 0 / 4 | 14/16 | vet (14/15), model-checked fuzz target, threat model v1, census + hardening-table + fuzz-regression in CI, ASan and cargo careful clean; a test that never ran restored; CI was red at 0.2.1 and is green |
 
 ## v0.1.0 release decision — which gates are waived, and why (2026-09-16)
 
@@ -231,3 +232,12 @@ H-12 (SBOM), H-13 (no git dependencies), H-14 (dependency freshness).
 This section is the "stated decision in the plan, not silently" that the
 release review asked for. A gate marked Incomplete above and not listed here is
 an omission, not a decision — that distinction is the point.
+
+## v1.0.0 readiness -- what still blocks (2026-10-01)
+
+Every v1.0.0 (★) gate not listed here is Completed with evidence. These remain, and neither is engineering the auditor can do:
+
+- H-10: one exemption (`portable-atomic`) -- the owner's `cargo vet trust`, or an audit.
+- H-27: thirty nights of `scheduled.yml` -- starts when it is pushed.
+
+Also open, not ★: H-38 (signed tags and attested artifacts need the owner's signing key). The release itself -- version bump, `cargo publish`, the tag -- is the owner's to run.
