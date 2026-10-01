@@ -135,14 +135,25 @@ remakes.
 
 | arm | instructions per list operation | vs C |
 |---|---:|---:|
-| FreeRTOS `list.c` | 22.32 | 1.00× |
-| `rusty_rtos_core::list` | **34.22** | **1.533×** |
+| FreeRTOS `list.c`, `-O2`, 64-bit | 22.32 | 1.00× |
+| `rusty_rtos_core::list`, 64-bit | **18.47** | **0.83× — faster than the C** |
+| FreeRTOS `list.c`, `-O2`, 32-bit | 33.42 | 1.00× |
+| `rusty_rtos_core::list`, 32-bit | **23.00** | **0.69× — faster than the C** |
 
-It was 46.45 and 2.081×. What closed the gap was reading each node a call
-touches **once**: `next_and_value` and `prev_of` replace a `links` accessor
-that returned more than any caller needed, `link_between` takes the `after` its
-callers already hold instead of re-reading it, and the sorted walk reads one
-node per step instead of two.
+Re-measured for 0.2.1. It was 46.45 and 2.081× at first, then 34.22 and
+1.533×. What closed the gap was reading each node a call touches **once**
+(`next_and_value` and `prev_of` replace an accessor that returned more than any
+caller needed; `link_between` takes the `after` its callers already hold), the
+end markers living in the same array as the items so an ordered walk stops on
+the marker's `MAX` value without ever testing for the end — which is exactly
+what `list.c` does — and, in 0.2.1, dropping a marker test in the round-robin
+that the wrap above it had already made unreachable.
+
+The per-list cursor and count deliberately stay in their own small array rather
+than in the marker node, where they would fit the padding exactly. That was
+built and measured: it loses 3.6%, because a separate array is a *no-alias*
+fact the optimiser uses to keep node fields in registers across every count
+update.
 
 Method: callgrind, three run lengths, the cost taken as the **slope** so
 fixed setup cannot flatter it — and both arms print checksum
