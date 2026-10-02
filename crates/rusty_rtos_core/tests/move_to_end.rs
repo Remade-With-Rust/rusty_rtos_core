@@ -48,6 +48,7 @@ fn move_to_end_is_remove_then_insert_end() {
     let mut moved = 0_u32;
     let mut refused = 0_u32;
     let mut cursor_on_item = 0_u32;
+    let mut bad_list = 0_u32;
     for seed in 1..=32_u32 {
         let mut rng = Rng(seed.wrapping_mul(0x9e37_79b9) | 1);
         let (mut pair, mut fused) = (L::new(), L::new());
@@ -55,7 +56,15 @@ fn move_to_end_is_remove_then_insert_end() {
             let l = (rng.next() % LISTS as u32) as ListId;
             let i = (rng.next() % u32::from(ITEMS)) as ItemId;
             let arg = rng.next();
-            match rng.next() % 5 {
+            match rng.next() % 6 {
+                // A list id that names no list -- `NO_LIST` (u8::MAX), the
+                // container of every free item, among them -- is refused
+                // with nothing written, whatever the item.
+                5 => {
+                    let bad = if arg % 2 == 0 { LISTS as ListId } else { u8::MAX };
+                    assert!(fused.move_to_end(bad, i).is_err(), "seed {seed} step {step}");
+                    bad_list += 1;
+                }
                 0 if pair.container(i).unwrap().is_none() => {
                     let v = arg % 4;
                     pair.insert(l, i, v).unwrap();
@@ -98,6 +107,7 @@ fn move_to_end_is_remove_then_insert_end() {
     }
     assert!(moved > 10_000, "only {moved} moves");
     assert!(refused > 10_000, "only {refused} refusals");
+    assert!(bad_list > 10_000, "only {bad_list} bad list ids");
     assert!(
         cursor_on_item > 1_000,
         "only {cursor_on_item} moves with the cursor ON the item"

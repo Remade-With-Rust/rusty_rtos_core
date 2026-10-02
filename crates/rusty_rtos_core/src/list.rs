@@ -764,6 +764,12 @@ impl<V: ListValue, const N: usize, const L: usize> ListsOf<V, N, L> {
     ///
     /// [`Error::InvalidArgument`] if either handle names nothing.
     pub fn move_to_end(&mut self, list: ListId, item: ItemId) -> Result<bool> {
+        // The LIST first, before anything is written. `NO_LIST` is a `ListId`
+        // too, and it is the container of every item in no list -- so with
+        // the list unchecked, `move_to_end(NO_LIST, free)` passed the
+        // membership test below and relinked a free item's stale neighbours
+        // before the late check refused it.
+        let mut cursor = self.list_meta(list)?.cursor;
         let (prev, next, container) = {
             let n = self.item(item)?;
             (n.prev, n.next, n.container)
@@ -775,13 +781,10 @@ impl<V: ListValue, const N: usize, const L: usize> ListsOf<V, N, L> {
         // steps back to its predecessor.
         self.at_mut(next).prev = prev;
         self.at_mut(prev).next = next;
-        let cursor = {
-            let m = self.list_meta_mut(list)?;
-            if m.cursor == item {
-                m.cursor = prev;
-            }
-            m.cursor
-        };
+        if cursor == item {
+            self.list_meta_mut(list)?.cursor = prev;
+            cursor = prev;
+        }
         // ...and relink just before the cursor, as `vListInsertEnd` does.
         let before = self.at(cursor).prev;
         {
