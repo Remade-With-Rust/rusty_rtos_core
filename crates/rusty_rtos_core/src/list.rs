@@ -1096,7 +1096,13 @@ impl<V: ListValue, const N: usize, const L: usize> Iterator for Iter<'_, V, N, L
     type Item = ItemId;
 
     fn next(&mut self) -> Option<ItemId> {
-        if self.remaining == 0 || ListsOf::<V, N, L>::is_end(self.at) {
+        // The count alone ends the walk. A list's `len` is the number of
+        // items between its marker's links -- this module's own invariant,
+        // the one `tests/list_differential.rs` holds against `list.c` -- so
+        // the link reaches the marker exactly when the count reaches zero,
+        // and testing both paid a compare and a branch per item for an
+        // answer the count already gave.
+        if self.remaining == 0 {
             return None;
         }
         let item = self.at;
