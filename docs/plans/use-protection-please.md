@@ -98,7 +98,7 @@ Evidence; excluded from the totals).
 | H-26 | ★ Fuzz target per public parser, decoder, or message handler | Completed | `fuzz/fuzz_targets/lists_arena.rs` (seeded corpus `fuzz/corpus/lists_arena/seed-*`): the arena and the lists against a reference model -- membership, lengths, `remove`'s count, stored values, live/dead/forged handles -- after every operation. 8,871 inputs in 60 s, no failure | |
 | H-27 | ★ Continuous fuzzing with no open crashes | Incomplete | the nightly job exists (`scheduled.yml`, 20 min per target on a persisted corpus); the gate needs 30 days of it, which starts when it is pushed | |
 | H-28 | Property tests cover the documented invariants | Completed | `tests/no_panic.rs`: 200 rounds × 500 random arena/list operations assert the documented invariants after every step (occupancy, generation monotonicity, list ordering, cursor validity) under a fixed LCG seed; unit tests pin the `list.c` tie rule and cursor semantics | |
-| H-29 | Mutation and/or differential testing on critical modules | Incomplete | the C oracle differential arrives with K1 | |
+| H-29 | Mutation and/or differential testing on critical modules | Completed | the list -- every ready, delayed and event list in the kernel -- against FreeRTOS's own `list.c` (V11.3.1, unmodified): `oracle/list/` drives both through the same 50,000-step random script of `vListInsert`, `vListInsertEnd`, `uxListRemove` and `listGET_OWNER_OF_NEXT_ENTRY` and `tests/list_differential.rs` requires every one of the 25,000 printed states (order, values, length, round-robin index) to be identical: identical on the first run (2026-10-02). Poisoned by inserting BEFORE equal values instead of after: diverges at trace line 3. Mutation testing over the crate (`mutants.out/`) beside it | |
 
 ### Phase 7 — Formal verification
 
@@ -207,6 +207,7 @@ Append one line per pass; never rewrite history. The trend is the point.
 | 2026-09-09 | survey | kairos (scaffold pass) | 7 / 0 / 28 | 5 | first pass, at stamp time; every Completed row names a file that exists |
 | 2026-09-09 | survey + tool probes | kairos (K0 pass) | 15 / 0 / 21 | 9 | deny, audit, clippy and Miri run on the developer box; evidence rows carry the K0 verdicts; risk register R-001..R-004 filled from the plan's §6, acceptance pending the architect |
 | 2026-10-01 | deep | v1.0-readiness pass | 29 / 0 / 4 | 14/16 | vet (14/15), model-checked fuzz target, threat model v1, census + hardening-table + fuzz-regression in CI, ASan and cargo careful clean; a test that never ran restored; CI was red at 0.2.1 and is green |
+| 2026-10-02 | deep | H-29 pass | see table | see table | the list differential against FreeRTOS `list.c` (50,000 steps, identical, poison-proven) closes H-29 |
 
 ## v0.1.0 release decision — which gates are waived, and why (2026-09-16)
 
