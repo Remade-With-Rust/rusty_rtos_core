@@ -749,6 +749,51 @@ impl<V: ListValue, const N: usize, const L: usize> ListsOf<V, N, L> {
         Ok(())
     }
 
+    /// `uxListRemove` then `vListInsertEnd` into the SAME list, fused: if
+    /// `item` is in `list`, move it to just before the round-robin cursor
+    /// and answer `true`; if it is not (in another list, or in none), change
+    /// nothing and answer `false`.
+    ///
+    /// The SMP scheduler does exactly this to the running task on every
+    /// switch (`prvSelectHighestPriorityTask`). As two calls it validated
+    /// the item twice, cleared and set its container, and walked the length
+    /// down and back up; here the node is read once and the length never
+    /// moves. The order it leaves is the pair's, cursor rule included.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::InvalidArgument`] if either handle names nothing.
+    pub fn move_to_end(&mut self, list: ListId, item: ItemId) -> Result<bool> {
+        let (prev, next, container) = {
+            let n = self.item(item)?;
+            (n.prev, n.next, n.container)
+        };
+        if container != list {
+            return Ok(false);
+        }
+        // Unlink -- `uxListRemove`'s cursor rule first: a cursor on the item
+        // steps back to its predecessor.
+        self.at_mut(next).prev = prev;
+        self.at_mut(prev).next = next;
+        let cursor = {
+            let m = self.list_meta_mut(list)?;
+            if m.cursor == item {
+                m.cursor = prev;
+            }
+            m.cursor
+        };
+        // ...and relink just before the cursor, as `vListInsertEnd` does.
+        let before = self.at(cursor).prev;
+        {
+            let n = self.at_mut(item);
+            n.prev = before;
+            n.next = cursor;
+        }
+        self.at_mut(before).next = item;
+        self.at_mut(cursor).prev = item;
+        Ok(true)
+    }
+
     /// `uxListRemove`: unlink an item and answer how many are left.
     ///
     /// # Errors
