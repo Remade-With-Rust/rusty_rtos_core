@@ -61,8 +61,15 @@ fn move_to_end_is_remove_then_insert_end() {
                 // container of every free item, among them -- is refused
                 // with nothing written, whatever the item.
                 5 => {
-                    let bad = if arg % 2 == 0 { LISTS as ListId } else { u8::MAX };
-                    assert!(fused.move_to_end(bad, i).is_err(), "seed {seed} step {step}");
+                    let bad = if arg % 2 == 0 {
+                        LISTS as ListId
+                    } else {
+                        u8::MAX
+                    };
+                    assert!(
+                        fused.move_to_end(bad, i).is_err(),
+                        "seed {seed} step {step}"
+                    );
                     bad_list += 1;
                 }
                 0 if pair.container(i).unwrap().is_none() => {

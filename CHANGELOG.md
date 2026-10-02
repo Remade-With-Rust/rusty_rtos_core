@@ -3,6 +3,28 @@
 Security-relevant changes are called out under **Security** (hardening gate
 H-38). Versions follow SemVer; in 0.x a minor bump may break the API.
 
+## 0.2.4 — 2026-10-02
+
+### Added
+- `ListsOf::move_to_end(list, item)`: `uxListRemove` then `vListInsertEnd`
+  into the SAME list, as one operation -- what the SMP scheduler does to the
+  running task on every switch. The item is read once and the length never
+  moves. Answers `Ok(false)` and changes nothing if the item is not in that
+  list; `Err` for a list or item id that names nothing, checked BEFORE
+  anything is written. Proved against the pair it fuses by
+  `tests/move_to_end.rs` (32 seeds x 5,000 steps: order, values, length and
+  round-robin cursor after every step, including bad list ids). In the
+  two-core kernel it took `select_for_core` -1,494,024 instructions on the
+  smp-ir bench (semtest -636,806).
+
+### Changed
+- The list iterator ends on its count alone. A list's length is the number
+  of items between its marker's links -- this crate's own invariant, held
+  against `list.c` by `tests/list_differential.rs` -- so testing for the
+  marker as well paid a compare and a branch per item. Two-core corpus:
+  semtest -212,931, BlockQ -187,484 instructions. No one-core path uses the
+  iterator; the one-core kernel is unchanged to the instruction.
+
 ## 0.2.3 — 2026-10-01
 
 ### Fixed

@@ -165,6 +165,14 @@ every arm's ticks, yields, exits and lines equal to the digit.
 bench/list-cost/run.sh      # from the Kairos umbrella
 ```
 
+**For two cores (0.2.4).** `move_to_end` fuses the remove-and-reinsert the SMP
+scheduler makes on every switch into one list operation, and the iterator the
+scheduler walks a ready list with ends on its count alone. On the two-core
+demo corpus (callgrind, 20,000 ticks, the 64-bit host) the two together are
+worth about 850,000 instructions on semtest's 67.6 million; the list-cost
+row above does not use either and is unchanged. The kernel's README has the
+whole two-core campaign.
+
 ## Portability
 
 `no_std` everywhere, with an `alloc` rung and a `std` rung above it. The crate
