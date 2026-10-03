@@ -91,6 +91,21 @@ pub trait TickHook<K>: Copy {
     /// [`TickHook::timer`].
     fn tick(self, kernel: &mut K) -> Self;
 
+    /// Whether [`TickHook::tick`] would do anything for this value.
+    ///
+    /// `false` promises that `tick` would hand `self` back untouched and
+    /// touch nothing in the kernel, and lets the kernel skip the call --
+    /// and with it the copy of the hook out and the copy back that the
+    /// by-value signature costs on every tick. For a hook that is an enum
+    /// over several interrupt halves, the copies are the size of the
+    /// largest one whichever is installed: 448 bytes, twice a tick, in the
+    /// demo's sim, for scenarios with no interrupt half at all.
+    ///
+    /// The default is `true`, which is always correct.
+    fn wants_tick(&self) -> bool {
+        true
+    }
+
     /// `TimerCallbackFunction_t`: what a software timer runs when it
     /// expires, on the daemon task.
     ///
@@ -154,6 +169,10 @@ impl<K> TickHook<K> for NoTickHook {
     fn tick(self, _kernel: &mut K) -> Self {
         self
     }
+
+    fn wants_tick(&self) -> bool {
+        false
+    }
 }
 
 #[cfg(test)]
@@ -181,5 +200,6 @@ mod tests {
         let hook = NoTickHook;
         assert_eq!(TickHook::tick(hook, &mut kernel), NoTickHook);
         assert_eq!(kernel, 0);
+        assert!(!TickHook::<u32>::wants_tick(&hook));
     }
 }

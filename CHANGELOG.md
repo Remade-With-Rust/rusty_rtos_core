@@ -3,6 +3,18 @@
 Security-relevant changes are called out under **Security** (hardening gate
 H-38). Versions follow SemVer; in 0.x a minor bump may break the API.
 
+## Unreleased
+
+### Added
+- `TickHook::wants_tick(&self) -> bool`, provided, default `true`: a hook
+  may say its `tick` would hand `self` back untouched, and the kernel then
+  skips the call and the copy of the hook out and back that the by-value
+  signature costs every tick. `NoTickHook` answers `false`. Adding a
+  provided method is not a breaking change. In the demo's sim, whose tick
+  hook is an enum the size of its largest interrupt half (448 bytes), it
+  took the scenarios with none -5.5M instructions of ~115M (BlockQ,
+  GenQTest), at +2 a tick for the scenarios that have one.
+
 ## 0.2.4 — 2026-10-02
 
 ### Added
