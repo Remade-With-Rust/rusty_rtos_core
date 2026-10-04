@@ -173,6 +173,13 @@ worth about 850,000 instructions on semtest's 67.6 million; the list-cost
 row above does not use either and is unchanged. The kernel's README has the
 whole two-core campaign.
 
+**0.2.5.** `TickHook::wants_tick` lets a hook with nothing to do say so, and
+the kernel then skips the call and the copy of the hook it costs every tick.
+`PosixDemoConfig` follows the build's pointer width -- a 32-bit tick and a
+four-byte message prefix on a 32-bit build, as the C's `unsigned long` and
+`size_t` are -- so a 32-bit build of the conformance corpus is checked
+against the `-m32` C kernel. See the CHANGELOG.
+
 ## Portability
 
 `no_std` everywhere, with an `alloc` rung and a `std` rung above it. The crate
