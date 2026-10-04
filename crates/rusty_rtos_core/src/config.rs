@@ -10,7 +10,7 @@
 //! `examples/template_configuration/FreeRTOSConfig.h` value for value.
 
 use crate::error::{Error, Result};
-use crate::tick::{Bits32, Bits64, TickWidth};
+use crate::tick::{Bits32, TickWidth};
 
 /// The kernel configuration, as constants a type carries.
 ///
@@ -239,9 +239,15 @@ impl Config for DefaultConfig {
 pub struct PosixDemoConfig;
 
 impl Config for PosixDemoConfig {
-    /// The Posix port types `TickType_t` as `unsigned long`, 64 bits on the
-    /// x86_64 Linux host the oracle runs on; `portMAX_DELAY` prints as 2^64-1.
-    type Tick = Bits64;
+    /// The Posix port types `TickType_t` as `unsigned long`, which is as wide
+    /// as a pointer on Linux: 64 bits on the x86_64 host the oracle runs on,
+    /// where `portMAX_DELAY` prints as 2^64-1, and 32 bits on every 32-bit
+    /// build -- the `-m32` oracle and the targets alike (HOLES.md H13).
+    #[cfg(target_pointer_width = "64")]
+    type Tick = crate::tick::Bits64;
+    /// See the 64-bit arm: `unsigned long` is 32 bits here.
+    #[cfg(not(target_pointer_width = "64"))]
+    type Tick = Bits32;
     const TICK_RATE_HZ: u32 = 1000;
     const DYNAMIC_ALLOCATION: bool = true;
     /// The Posix port wraps its `pthread_create` in a critical section.
@@ -256,8 +262,9 @@ impl Config for PosixDemoConfig {
     const CHECK_FOR_STACK_OVERFLOW: u8 = 0;
     const USE_TICK_HOOK: bool = true;
     const NOTIFICATION_ARRAY_ENTRIES: usize = 3;
-    // The oracle host is x86-64, so `size_t` is eight bytes wide.
-    const MESSAGE_LENGTH_BYTES: usize = 8;
+    // The C's `size_t`: eight bytes on the x86-64 oracle host, four on a
+    // 32-bit build.
+    const MESSAGE_LENGTH_BYTES: usize = core::mem::size_of::<usize>();
     const TOTAL_HEAP_SIZE: usize = 65 * 1024;
     const MAX_TASKS: usize = 64;
     const MAX_QUEUES: usize = 64;

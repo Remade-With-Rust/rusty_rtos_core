@@ -15,6 +15,17 @@ H-38). Versions follow SemVer; in 0.x a minor bump may break the API.
   took the scenarios with none -5.5M instructions of ~115M (BlockQ,
   GenQTest), at +2 a tick for the scenarios that have one.
 
+### Changed
+- `PosixDemoConfig` follows the build's pointer width: `Tick` is `Bits32`
+  and `MESSAGE_LENGTH_BYTES` is 4 on a 32-bit build (`Bits64` and 8 on a
+  64-bit one, unchanged). It is the C `Posix_GCC` demo's configuration, and
+  there `TickType_t` is `unsigned long` and the length prefix a `size_t` --
+  both as wide as a pointer -- so the `-m32` C kernel prints 32-bit ticks
+  and writes four-byte prefixes. Before this, a 32-bit build of it carried
+  the 64-bit host's widths and could only be compared against the 64-bit C.
+  A 32-bit user of `PosixDemoConfig` sees the narrower tick; anyone who wants
+  the u64 on a target names `Bits64` in their own `Config`.
+
 ## 0.2.4 — 2026-10-02
 
 ### Added
