@@ -32,7 +32,3 @@ notes = "This repository: first-party code, reviewed in this repository."
 [policy.rusty_rtos_core]
 audit-as-crates-io = false
 notes = "This repository: first-party code, reviewed in this repository."
-
-[[exemptions.portable-atomic]]
-version = "1.15.0"
-criteria = "safe-to-deploy"
