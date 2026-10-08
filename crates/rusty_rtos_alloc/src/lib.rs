@@ -128,6 +128,11 @@ mod tests {
         // did this crate's `alloc` feature there; 2.2.2 builds, and also asks
         // the Mach region table rather than `mincore` whether a managed range
         // is mapped, and fixes a `blockmap` abort under segment adoption.
-        assert_eq!(super::VERSION, "2.2.2");
+        //
+        // 2.2.5 (2026-10-08): fixes only, no API change. 2.2.1-2.2.4 failed to
+        // build in an MSVC consumer that unwinds with LTO ("Bogus funclet pad
+        // use": `dealloc` inlined the core's `asm!` goto into EH cleanup
+        // funclets); 2.2.5 builds there. Moved with the portfolio rollout.
+        assert_eq!(super::VERSION, "2.2.5");
     }
 }
