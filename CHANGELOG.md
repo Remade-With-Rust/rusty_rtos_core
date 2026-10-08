@@ -3,6 +3,12 @@
 Security-relevant changes are called out under **Security** (hardening gate
 H-38). Versions follow SemVer; in 0.x a minor bump may break the API.
 
+## 0.2.6 — 2026-10-08
+
+Allocator update; no API change (`cargo semver-checks` against crates.io: no semver update required).
+
+- `rusty_alloc-api` (and, where pinned, `rusty_alloc`) `=2.2.5`, part of the portfolio-wide rollout. 2.2.5 fixes 2.2.1–2.2.4 failing to build in an MSVC consumer that unwinds with LTO.
+
 ## 0.2.5 — 2026-10-04
 
 ### Added
