@@ -2,7 +2,7 @@
 # Build FreeRTOS's own list.c (the pinned oracle, unmodified) into the list
 # differential driver and write `list.trace`, which
 # `crates/rusty_rtos_core/tests/list_differential.rs` replays. Under WSL:
-#   wsl -e sh -c 'cd /mnt/f/coding/rusty_RTOS/rusty_rtos_core/oracle/list && sh run.sh'
+#   wsl -e sh -c 'cd /mnt/e/coding/rusty_RTOS/rusty_rtos_core/oracle/list && sh run.sh'
 set -eu
 here=$(cd "$(dirname "$0")" && pwd)
 kernel="$here/../../../oracle/FreeRTOS-Kernel"
