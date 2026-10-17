@@ -133,6 +133,11 @@ mod tests {
         // build in an MSVC consumer that unwinds with LTO ("Bogus funclet pad
         // use": `dealloc` inlined the core's `asm!` goto into EH cleanup
         // funclets); 2.2.5 builds there. Moved with the portfolio rollout.
-        assert_eq!(super::VERSION, "2.2.5");
+        //
+        // 2.2.6 (2026-10-09): one fix, no API change. A free span merged with
+        // its neighbour now keeps that neighbour's purged flag, so a span whose
+        // pages were already returned to the OS is no longer treated as
+        // committed. Moved with wave 1 of the portfolio release campaign.
+        assert_eq!(super::VERSION, "2.2.6");
     }
 }
