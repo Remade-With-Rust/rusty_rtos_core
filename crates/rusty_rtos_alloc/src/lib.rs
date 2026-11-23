@@ -138,6 +138,15 @@ mod tests {
         // its neighbour now keeps that neighbour's purged flag, so a span whose
         // pages were already returned to the OS is no longer treated as
         // committed. Moved with wave 1 of the portfolio release campaign.
-        assert_eq!(super::VERSION, "2.2.6");
+        //
+        // 2.6.0 (2026-11-14), via 2.3.1, 2.4.0 and 2.5.0 -- no change this seam
+        // relies on. 2.3.1 reserves the default arena uncommitted and commits it
+        // 32 MiB at a time (no 1 GiB commit charge on Windows or at a Linux
+        // overcommit check); 2.4.0 purges by default after a real 10 ms delay
+        // and stops a thread costing 32 MiB of Windows commit; 2.5.0 shortens
+        // `GlobalAlloc::realloc`'s entry; 2.6.0 adds `core::alloc::Allocator`
+        // behind a new, opt-in `allocator-api` feature. Moved with the
+        // 2026-11-22 house-pins rollout.
+        assert_eq!(super::VERSION, "2.6.0");
     }
 }
